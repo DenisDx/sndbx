@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sndbx Web UI</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #1a1d27;
+    --border: #2a2d3a;
+    --accent: #5b8af7;
+    --text: #d0d4e8;
+    --muted: #6b7090;
+    --ok: #4caf86;
+    --warn: #f0a500;
+    --err: #e05555;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", sans-serif; font-size: 14px; }
+
+  #login-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .login-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 36px; width: 360px; }
+  .login-box h1 { font-size: 1.5rem; margin-bottom: 18px; color: var(--accent); }
+  .login-box input {
+    width: 100%; padding: 10px 12px; margin-bottom: 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text);
+  }
+  .login-box button {
+    width: 100%; padding: 10px; border: none; border-radius: 6px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  .login-box button:hover { opacity: 0.92; }
+  #login-error { color: var(--err); margin-top: 10px; min-height: 18px; }
+
+  #app-screen { display: none; flex-direction: column; min-height: 100vh; }
+  nav {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  nav .brand { font-size: 1.1rem; font-weight: 700; color: var(--accent); }
+  nav .spacer { flex: 1; }
+  nav button {
+    padding: 6px 14px; border: 1px solid var(--border); border-radius: 6px;
+    background: transparent; color: var(--text); cursor: pointer;
+  }
+  nav button:hover, nav button.active { border-color: var(--accent); color: var(--accent); }
+
+  .page { display: none; padding: 20px; }
+  .page.active { display: block; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .card-title { color: var(--muted); text-transform: uppercase; font-size: 12px; margin-bottom: 10px; letter-spacing: .06em; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
+
+  .health-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+  .health-item:last-child { border-bottom: none; }
+  .badge {
+    display: inline-block; border-radius: 999px; font-size: 12px; padding: 2px 10px;
+    border: 1px solid var(--border);
+  }
+  .ok { color: var(--ok); border-color: #2f6a4f; background: rgba(76, 175, 134, 0.12); }
+  .bad { color: var(--err); border-color: #6a2f2f; background: rgba(224, 85, 85, 0.12); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .actions button {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .actions button:hover { border-color: var(--accent); color: var(--accent); }
+
+  .muted { color: var(--muted); }
+  #dash-message { min-height: 20px; color: var(--warn); margin: 8px 0 0; }
+  #service-indicator { margin-right: 4px; }
+
+  .toolbar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .toolbar select, .toolbar button {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .toolbar button:hover { border-color: var(--accent); color: var(--accent); }
+  #console-terminal {
+    height: 460px;
+    background: #0a0c12;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+  }
+  #console-status { min-height: 20px; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+</head>
+<body>
+  <div id="login-screen">
+    <div class="login-box">
+      <h1>sndbx</h1>
+      <input id="login-input" type="text" placeholder="Login" autocomplete="username">
+      <input id="pass-input" type="password" placeholder="Password" autocomplete="current-password">
+      <button id="login-btn">Sign in</button>
+      <div id="login-error"></div>
+    </div>
+  </div>
+
+  <div id="app-screen">
+    <nav>
+      <span class="brand">sndbx</span>
+      <button id="nav-dashboard" class="active" onclick="showPage('dashboard')">Dashboard</button>
+      <button id="nav-settings" onclick="showPage('settings')">Settings</button>
+      <button id="nav-console" onclick="showPage('console')">Console</button>
+      <span class="spacer"></span>
+      <span id="service-indicator" class="badge ok">Online</span>
+      <button id="restart-service-btn">Restart Service</button>
+      <span id="whoami" class="muted"></span>
+      <button id="logoff-btn">Log off</button>
+    </nav>
+
+    <div id="page-dashboard" class="page active">
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-title">Docker</div>
+          <div id="health-docker" class="badge">—</div>
+          <div id="health-docker-detail" class="muted" style="margin-top:8px"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Kata</div>
+          <div id="health-kata" class="badge">—</div>
+          <div id="health-kata-detail" class="muted" style="margin-top:8px"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Web UI</div>
+          <div id="health-webui" class="badge">—</div>
+          <div id="health-webui-detail" class="muted" style="margin-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="card">
+          <div class="card-title">Current containers</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Sandbox</th>
+              <th>Auto-start</th>
+              <th>Status</th>
+              <th>Image</th>
+              <th>Docker ports</th>
+              <th>SSH port</th>
+              <th>VM</th>
+              <th>SSH</th>
+            </tr>
+          </thead>
+          <tbody id="containers-body"></tbody>
+        </table>
+        <div id="dash-message"></div>
+      </div>
+    </div>
+
+    <div id="page-settings" class="page">
+      <div class="card">
+        <div class="card-title">Settings</div>
+        <div class="muted">Settings editor will be added in next iteration.</div>
+      </div>
+    </div>
+
+    <div id="page-console" class="page">
+      <div class="card">
+        <div class="card-title">Console</div>
+        <div class="toolbar">
+          <label for="console-sandbox" class="muted">Sandbox:</label>
+          <select id="console-sandbox"></select>
+          <button id="console-connect-btn">Connect</button>
+          <button id="console-disconnect-btn">Disconnect</button>
+        </div>
+        <div id="console-terminal"></div>
+        <div id="console-status" class="muted" style="margin-top:10px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+// sndbx main configuration (JSON5 format)
+{
+  version: "1.0",
+  title: "sndbx minimal setup",
+  instance: "${SNDBX_INSTANCE:-sndbx-dev}",
+  root: "${SNDBX_ROOT}",
+  
+  logging: {
+    level: "${LOG_LEVEL:-info}",
+    wipe_period: ${LOG_WIPE_PERIOD:-0},
+  },
+
+  webui: {
+    port: ${WEBUI_PORT:-30080},
+    bind: "${WEBUI_HOST:-127.0.0.1}",
+    auth: {
+      mode: "login",
+      session_ttl: 86400,
+      users: [
+        {
+          login: "${ROOT_USER:-admin}",
+          password: "${ROOT_PASSWORD:-changeme}",
+          permissions: ["all"]
+        }
+      ]
+    }
+  },
+
+  mcp: {
+    port: ${MCP_PORT:-30081},
+    bind: "${MCP_HOST:-0.0.0.0}",
+    auth: {
+      mode: "token",
+      tokens: ["${MCP_TOKENS:-test-token-123456789}"]
+    },
+    items: []  // reserved for future multi-backend support
+  },
+
+  sandboxes: {
+    items: {
+      "sandbox-1": {
+        title: "Default Sandbox",
+        image: "${VM_IMAGE:-ubuntu:22.04}",
+        memory: "${VM_MEMORY:-2G}",
+        cpus: ${VM_CPUS:-2},
+        disk_max: "${VM_DISK_MAX:-20G}",
+        network_traffic_max: "${VM_NETWORK_TRAFFIC_MAX:-100G}",
+        persistent: true,
+        run_at_startup: true,
+        ssh_keys: [],
+        shared_directories: [
+          {
+            host_path: "${VM_SHARED_DIR:-/tmp/sndbx-shared}",
+            guest_path: "/mnt/shared",
+            permission: "rw"
+          }
+        ]
+      }
+    }
+  },
+
+  envids: {
+    "default-env-token": {
+      sandbox: "sandbox-1",
+      description: "Default environment for testing"
+    }
+  },
+
+  users: {
+    items: [
+      {
+        login: "testuser",
+        password: "testpass",
+        token: "test-token-123456789",
+        envids: ["default-env-token"]
+      }
+    ]
+  },
+
+  ssh: {
+    port_range: [${SSH_PORT_MIN:-30200}, ${SSH_PORT_MAX:-30210}],
+    session_ttl: 3600  // 1 hour
+  }
+}
