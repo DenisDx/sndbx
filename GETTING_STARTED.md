@@ -188,6 +188,8 @@ sandboxes: {
 1. Verify Kata runtime: `kata-runtime --version`
 2. Test Docker: `docker ps`
 3. Check Kata is registered: `docker run --rm --runtime kata alpine echo "test"`
+4. Verify Kata config exists: `test -f /etc/kata-containers/configuration.toml && echo KATA_CFG_OK`
+5. If command exits with `125` and mentions missing `configuration.toml`, copy it from Kata defaults and restart Docker
 
 ### Authentication fails
 

@@ -3,6 +3,26 @@
 ## Short Description
 sndbx is a safe and isolated sandbox platform with MCP access. It uses Docker + Kata + Firecracker to provide VM-like execution environments, CLI access, file operations, and management through Web UI and MCP tools.
 
+sndbx is a part of an ecosystem that enables the construction of hybrid multi-agent AI systems, but can also be used autonomously
+
+![system scheme](system_scheme.svg)
+
+Possible applications:
+
+As part of an automated multi-agent system ( e.g., OpenClaw or Aidir :-) ) providing access via the MCP protocol to
+- a console (cli) with full access - installing and running applications, developing applications, work with files etc.
+
+- used via Aidir Tools Injection - allows replacing a model with a system with search tools, development tools with script execution, and adding file management
+
+- serves as secure file storage with access via MCP, ftp, smb etc
+
+Using this system, you can easily provide each agent with its own (or shared) sandbox, in which it will have full root access (but you may limit it if needed). Restrictions can be imposed at the virtual machine level, such as maximum used disk space, CPU load, and so on.
+Non-persistent machines can be used, meaning that after finishing work, the virtual machine will return to its fresh state.
+
+The use of individual per-agent virtual environments partially solves the problem of promt injection, which is important for externally open systems (such as colloc) - the system will be able to perform complex operations up to the development and execution of program code, work with files, etc. - but even if the user convinces the system to execute the `sudo rm -rf /` command, after the conversation with him ends, everything will return to its original state.
+
+Moreover, this allows running in one environment (and even on one physical computer) multiple independent multi-agent systems - "work groups", each of whose "employees" has their own computer, their own files, can work with shared files, etc.
+
 ## Installation
 Follow the steps below on Ubuntu 22.04+.
 
@@ -142,6 +162,36 @@ cp .env.example .env
 kata-runtime --version
 firecracker --version
 docker info | grep -A5 Runtimes
+```
+
+Required Kata readiness checks (must pass before starting sandboxes):
+
+```bash
+test -f /etc/kata-containers/configuration.toml && echo KATA_CFG_OK
+docker info --format '{{json .Runtimes}}' | grep -q '"kata"' && echo KATA_RUNTIME_OK
+docker run --rm --runtime kata alpine echo OK
+```
+
+If the last command fails with exit code `125` and mentions missing `configuration.toml`, restore it from Kata defaults:
+
+```bash
+CFG_SRC="$(for f in \
+  /opt/kata/share/defaults/kata-containers/configuration.toml \
+  /opt/kata/share/defaults/kata-containers/configuration-qemu.toml \
+  /opt/kata/share/defaults/kata-containers/configuration-fc.toml \
+  /opt/kata/share/defaults/kata-containers/configuration-clh.toml \
+  /mnt/raid1/kata/share/defaults/kata-containers/configuration.toml \
+  /mnt/raid1/kata/share/defaults/kata-containers/configuration-qemu.toml \
+  /mnt/raid1/kata/share/defaults/kata-containers/configuration-fc.toml \
+  /mnt/raid1/kata/share/defaults/kata-containers/configuration-clh.toml
+do
+  [ -f "$f" ] && echo "$f" && break
+done)"
+
+echo "Using config source: $CFG_SRC"
+sudo mkdir -p /etc/kata-containers
+sudo cp "$CFG_SRC" /etc/kata-containers/configuration.toml
+sudo systemctl restart docker
 ```
 
 Then open Web UI on the configured host and port from `.env` and `config.json5`.
@@ -416,6 +466,7 @@ The `config.json5` file defines sandboxes, users, and MCP settings:
 - Check Docker daemon: `docker ps`
 - Inspect Docker logs: `sudo journalctl -u docker -f`
 - Test manual Docker run: `docker run --rm --runtime kata alpine echo "test"`
+- If `docker run --runtime kata ...` fails with `Cannot find usable config file` or exit code `125`, restore `/etc/kata-containers/configuration.toml` from Kata defaults (see "Verify Installation" section above)
 
 ### Token authentication fails
 

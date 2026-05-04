@@ -2,10 +2,12 @@
 
 const $ = (id) => document.getElementById(id);
 let refreshTimer = null;
+let logTimer = null;
 let term = null;
 let termSocket = null;
 let consoleLoaded = false;
 let termDataDisposable = null;
+let logPanelBound = false;
 
 function showScreen(name) {
   $("login-screen").style.display = name === "login" ? "flex" : "none";
@@ -18,9 +20,23 @@ function showPage(name) {
   $("page-" + name).classList.add("active");
   $("nav-" + name).classList.add("active");
 
+  if (name === "dashboard") {
+    setupLogPanel();
+    updateLogTimer();
+    loadSystemLog();
+  } else {
+    clearInterval(logTimer);
+    logTimer = null;
+  }
+
   if (name === "console") {
     initConsole();
   }
+}
+
+function isDashboardActive() {
+  const page = $("page-dashboard");
+  return !!(page && page.classList.contains("active"));
 }
 
 async function apiPost(url, body) {
@@ -133,11 +149,12 @@ function setDashMessage(text, ok = false) {
 
 async function runAction(sandboxId, action) {
   const res = await apiPost(`/api/sandbox/${encodeURIComponent(sandboxId)}/action`, { action });
-  if (!res.ok) {
-    setDashMessage((res.data && (res.data.detail || res.data.error)) || "Action failed", false);
+  const payloadOk = !!(res.data && res.data.ok);
+  if (!res.ok || !payloadOk) {
+    setDashMessage((res.data && (res.data.message || res.data.detail || res.data.error)) || "Action failed", false);
     return;
   }
-  setDashMessage("Action executed", true);
+  setDashMessage((res.data && res.data.message) || "Action executed", true);
   await loadDashboard();
 }
 window.runAction = runAction;
@@ -175,6 +192,145 @@ async function loadDashboard() {
   $("whoami").textContent = data.session && data.session.login ? `User: ${data.session.login}` : "";
 }
 
+function setLogMeta(text, ok = true) {
+  const el = $("system-log-meta");
+  if (!el) return;
+  el.textContent = text || "";
+  el.style.color = ok ? "var(--muted)" : "var(--err)";
+}
+
+async function loadSystemLog() {
+  const out = $("system-log-output");
+  if (!out || !isDashboardActive()) {
+    return;
+  }
+
+  const lines = 400;
+  const data = await apiGet(`/api/system-log?lines=${lines}`);
+  if (!data) {
+    setLogMeta("Log endpoint unavailable", false);
+    return;
+  }
+  if (!data.ok) {
+    out.textContent = "";
+    setLogMeta((data.error || "Unable to read logs") + ` (source: ${data.source || "none"})`, false);
+    return;
+  }
+
+  out.textContent = data.text || "(empty log)";
+  setLogMeta(`Source: ${data.source || "unknown"} | lines: ${data.lines || lines}`, true);
+
+  const autoScroll = $("log-auto-scroll");
+  if (autoScroll && autoScroll.checked) {
+    out.scrollTop = out.scrollHeight;
+  }
+}
+
+async function repairKataRuntime() {
+  if (!window.confirm("Try to repair Docker kata runtime now?")) {
+    return;
+  }
+
+  setDashMessage("Running kata runtime repair...", true);
+  const out = $("system-log-output");
+  const meta = $("system-log-meta");
+
+  const res = await apiPost("/api/runtime/kata/repair", {});
+  if (!res.ok) {
+    setDashMessage((res.data && (res.data.detail || res.data.error)) || "Repair request failed", false);
+    if (meta) meta.textContent = "Repair request failed";
+    return;
+  }
+
+  const data = res.data || {};
+  const lines = [];
+  lines.push(`[repair] ${data.message || (data.ok ? "ok" : "failed")}`);
+  (data.report || []).forEach((line) => lines.push(String(line)));
+  if (Array.isArray(data.manual_commands) && data.manual_commands.length) {
+    lines.push("");
+    lines.push("Manual commands:");
+    data.manual_commands.forEach((cmd) => lines.push(cmd));
+  }
+
+  if (out) {
+    out.textContent = lines.join("\n");
+    const autoScroll = $("log-auto-scroll");
+    if (autoScroll && autoScroll.checked) {
+      out.scrollTop = out.scrollHeight;
+    }
+  }
+
+  if (meta) {
+    meta.textContent = data.ok ? "Repair completed successfully" : "Repair did not complete automatically";
+    meta.style.color = data.ok ? "var(--muted)" : "var(--warn)";
+  }
+
+  setDashMessage(data.ok ? "Kata runtime repair completed" : "Kata runtime repair needs manual step", data.ok);
+  await loadDashboard();
+}
+
+function updateLogTimer() {
+  clearInterval(logTimer);
+  logTimer = null;
+
+  if (!isDashboardActive()) {
+    return;
+  }
+
+  const auto = $("log-auto-update");
+  const freq = $("log-refresh-ms");
+  if (!auto || !freq || !auto.checked) {
+    return;
+  }
+
+  const intervalMs = Math.max(500, parseInt(freq.value || "3000", 10));
+  logTimer = setInterval(() => {
+    loadSystemLog();
+  }, intervalMs);
+}
+
+function setupLogPanel() {
+  if (logPanelBound) {
+    return;
+  }
+
+  const auto = $("log-auto-update");
+  const freq = $("log-refresh-ms");
+  const refresh = $("log-refresh-btn");
+  const repair = $("kata-repair-btn");
+  const scroll = $("log-auto-scroll");
+  const out = $("system-log-output");
+
+  if (!auto || !freq || !refresh || !repair || !scroll || !out) {
+    return;
+  }
+
+  auto.addEventListener("change", () => {
+    updateLogTimer();
+  });
+
+  freq.addEventListener("change", () => {
+    updateLogTimer();
+    loadSystemLog();
+  });
+
+  refresh.addEventListener("click", () => {
+    loadSystemLog();
+  });
+
+  repair.addEventListener("click", () => {
+    repairKataRuntime();
+  });
+
+  scroll.addEventListener("change", () => {
+    if (scroll.checked) {
+      out.scrollTop = out.scrollHeight;
+    }
+  });
+
+  logPanelBound = true;
+}
+
 function escapeHtml(s) {
   return String(s || "")
     .replaceAll("&", "&amp;")
@@ -208,7 +364,9 @@ async function onLogout() {
 function doLogout() {
   disconnectConsole();
   clearInterval(refreshTimer);
+  clearInterval(logTimer);
   refreshTimer = null;
+  logTimer = null;
   showScreen("login");
 }
 

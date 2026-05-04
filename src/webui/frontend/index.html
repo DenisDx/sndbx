@@ -107,6 +107,38 @@
     padding: 8px;
   }
   #console-status { min-height: 20px; }
+  #system-log-output {
+    height: 260px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #0b0d13;
+    padding: 10px;
+    font-family: "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.35;
+    white-space: pre;
+    margin-top: 10px;
+  }
+  .log-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .log-controls label {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .log-controls select, .log-controls button {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .log-controls button:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 </head>
@@ -171,6 +203,26 @@
           <tbody id="containers-body"></tbody>
         </table>
         <div id="dash-message"></div>
+      </div>
+
+      <div class="card">
+        <div class="log-controls">
+          <div class="card-title" style="margin-bottom: 0;">System log</div>
+          <label class="muted"><input id="log-auto-update" type="checkbox" checked> Enable update</label>
+          <label class="muted" for="log-refresh-ms">Frequency</label>
+          <select id="log-refresh-ms">
+            <option value="1000">1s</option>
+            <option value="2000">2s</option>
+            <option value="3000" selected>3s</option>
+            <option value="5000">5s</option>
+            <option value="10000">10s</option>
+          </select>
+          <label class="muted"><input id="log-auto-scroll" type="checkbox" checked> Auto scroll</label>
+          <button id="log-refresh-btn">Refresh now</button>
+          <button id="kata-repair-btn">Repair Kata Runtime</button>
+        </div>
+        <pre id="system-log-output">Loading logs...</pre>
+        <div id="system-log-meta" class="muted" style="margin-top:8px"></div>
       </div>
     </div>
 

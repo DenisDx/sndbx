@@ -57,7 +57,79 @@ class DockerSandboxManager:
             "invalid option",
         ]
         return any(hint in text for hint in hints)
-    
+
+    def _is_kata_runtime_unavailable(self, output: str) -> bool:
+        """Detect missing/unknown kata runtime in Docker daemon."""
+        text = (output or "").lower()
+        hints = [
+            "unknown or invalid runtime name",
+            "unknown runtime specified",
+            "runtime name: kata",
+            "runtime kata",
+        ]
+        return any(hint in text for hint in hints)
+
+    def _is_name_conflict(self, output: str) -> bool:
+        """Detect container name conflict on create."""
+        text = (output or "").lower()
+        return "conflict" in text and "container name" in text and "already in use" in text
+
+    def _is_kata_config_missing(self, output: str) -> bool:
+        """Detect missing kata configuration files from runtime output."""
+        text = (output or "").lower()
+        return "configuration.toml" in text and "does not exist" in text
+
+    def get_container_ip(self, sandbox_id: str) -> Optional[str]:
+        """Return Docker bridge IP for a running sandbox container, or None."""
+        ok, out = self._run_docker_cmd([
+            'inspect', '--format', '{{.NetworkSettings.IPAddress}}',
+            f'sndbx-{sandbox_id}',
+        ])
+        ip = out.strip() if ok else ""
+        return ip if ip and ip not in ("<no value>", "0.0.0.0", "") else None
+
+    def exec_ssh_setup(self, sandbox_id: str, authorized_keys: List[str]) -> tuple[bool, str]:
+        """Install sshd and configure authorized_keys inside a running container.
+
+        Installs openssh-server when absent, writes authorized_keys, enables
+        root login with key-only auth and (re)starts the sshd daemon.
+        Returns (ok, message).
+        """
+        keys_block = "\n".join(authorized_keys) if authorized_keys else ""
+        # Inline setup script executed via docker exec.
+        setup_script = r"""
+set -e
+if ! command -v sshd >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+fi
+mkdir -p /root/.ssh /run/sshd
+chmod 700 /root/.ssh
+cat > /root/.ssh/authorized_keys << 'SNDBX_KEYS'
+""" + keys_block + r"""
+SNDBX_KEYS
+chmod 600 /root/.ssh/authorized_keys
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+pkill -x sshd || true
+/usr/sbin/sshd
+"""
+        try:
+            result = subprocess.run(
+                ['docker', 'exec', f'sndbx-{sandbox_id}', 'bash', '-c', setup_script],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                logger.info("SSH daemon configured in sandbox '%s'", sandbox_id)
+                return True, "sshd started"
+            msg = (result.stdout + result.stderr).strip()
+            logger.warning("SSH setup failed in sandbox '%s': %s", sandbox_id, msg)
+            return False, msg
+        except subprocess.TimeoutExpired:
+            return False, "ssh setup timed out (120 s)"
+        except Exception as exc:
+            return False, str(exc)
+
     def get_status(self, sandbox_id: str) -> SandboxStatus:
         """Get current status of a sandbox"""
         success, output = self._run_docker_cmd([
@@ -129,7 +201,8 @@ class DockerSandboxManager:
                 'sleep', 'infinity'  # Keep container running
             ]
 
-        success, output = self._run_docker_cmd(cmd_with_disk_limit)
+        launch_cmd = cmd_with_disk_limit
+        success, output = self._run_docker_cmd(launch_cmd)
         if not success and disk_max and self._is_storage_opt_unsupported(output):
             logger.warning(
                 "Disk limit '%s' is not supported by current Docker storage driver. "
@@ -137,11 +210,43 @@ class DockerSandboxManager:
                 disk_max,
                 sandbox_id,
             )
-            success, output = self._run_docker_cmd(base_cmd)
+            launch_cmd = base_cmd
+            success, output = self._run_docker_cmd(launch_cmd)
+
+        if not success and self._is_name_conflict(output):
+            logger.warning(
+                "Container name conflict for sandbox '%s'. Removing stale container and retrying once.",
+                sandbox_id,
+            )
+            rm_ok, rm_out = self._run_docker_cmd(['rm', '-f', f'sndbx-{sandbox_id}'])
+            if rm_ok:
+                success, output = self._run_docker_cmd(launch_cmd)
+            else:
+                output = f"{output}\nCleanup failed: {rm_out}"
 
         if success:
             logger.info(f"Created sandbox {sandbox_id}")
         else:
+            needs_cleanup = self._is_kata_runtime_unavailable(output) or self._is_kata_config_missing(output)
+            if needs_cleanup:
+                rm_ok, rm_out = self._run_docker_cmd(['rm', '-f', f'sndbx-{sandbox_id}'])
+                if rm_ok:
+                    logger.warning("Removed failed container shell for sandbox '%s' after create error", sandbox_id)
+                else:
+                    logger.warning("Could not clean up failed container '%s': %s", sandbox_id, rm_out)
+
+            if self._is_kata_runtime_unavailable(output):
+                output = (
+                    f"{output}\n"
+                    "Hint: Docker runtime 'kata' is not registered. "
+                    "Run ./install_prerequisites.sh to configure /etc/docker/daemon.json and restart docker."
+                )
+            if self._is_kata_config_missing(output):
+                output = (
+                    f"{output}\n"
+                    "Hint: Kata configuration is missing. Run 'Repair Kata Runtime' in Web UI, "
+                    "or install prerequisites again to restore configuration.toml."
+                )
             logger.error(f"Failed to create sandbox {sandbox_id}: {output}")
 
         return success, output

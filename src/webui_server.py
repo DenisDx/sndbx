@@ -11,8 +11,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import pty
+import re
+import shlex
 import signal
 import secrets
 import subprocess
@@ -25,6 +28,9 @@ import uvicorn
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+
+logger = logging.getLogger("sndbx")
 
 
 def _utc_now() -> datetime:
@@ -104,8 +110,13 @@ class SessionStore:
             self._session_path(token).unlink(missing_ok=True)
 
 
-class SSHPortPool:
-    """Simple SSH port reservation pool for dashboard actions (v1)."""
+class SSHManager:
+    """SSH port reservation and socat forwarder management for sandbox SSH access.
+
+    Reserves host ports from a configured pool and maintains socat processes that
+    forward <host_port> -> <container_ip>:22 so clients can SSH into sandboxes.
+    State is persisted in data/ssh_allocations.json to survive Web UI restarts.
+    """
 
     def __init__(self, root_dir: Path, port_range: List[int]):
         self.root_dir = root_dir
@@ -135,47 +146,123 @@ class SSHPortPool:
         self.path.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
 
     def get(self, sandbox_id: str) -> Optional[int]:
-        """Get reserved SSH port for sandbox if present."""
+        """Return reserved host port for sandbox if present."""
         data = self._load()
         row = data.get(sandbox_id)
         if not row:
             return None
         try:
-            return int(row.get("port"))
+            return int(row["port"])
         except Exception:
             return None
 
-    def reserve(self, sandbox_id: str) -> tuple[bool, Optional[int], Optional[str]]:
-        """Reserve free port for sandbox, return (ok, port, error)."""
-        data = self._load()
-
-        current = data.get(sandbox_id)
-        if current and "port" in current:
-            return True, int(current["port"]), None
-
-        used = {int(v.get("port")) for v in data.values() if isinstance(v, dict) and "port" in v}
-
-        for port in range(self.start, self.end + 1):
-            if port in used:
-                continue
-            data[sandbox_id] = {
-                "port": port,
-                "allocated_at": _utc_now().isoformat(),
-                "state": "reserved",
-            }
-            self._save(data)
-            return True, port, None
-
-        return False, None, "no_ports_available"
-
-    def release(self, sandbox_id: str) -> bool:
-        """Release reserved port for sandbox."""
-        data = self._load()
-        if sandbox_id in data:
-            del data[sandbox_id]
-            self._save(data)
+    def _is_alive(self, pid: int) -> bool:
+        """Check whether the socat process with given PID is still running."""
+        try:
+            os.kill(pid, 0)
             return True
-        return False
+        except (ProcessLookupError, PermissionError):
+            return False
+
+    def open(self, sandbox_id: str, container_ip: str) -> tuple[bool, Optional[int], Optional[str]]:
+        """Reserve a host port and start a socat forwarder to container_ip:22.
+
+        Returns (ok, host_port, error_message).
+        """
+        data = self._load()
+
+        row = data.get(sandbox_id, {})
+        existing_port = row.get("port")
+        existing_pid = row.get("socat_pid")
+
+        # Reuse existing forwarder if still alive.
+        if existing_port and existing_pid and self._is_alive(int(existing_pid)):
+            return True, int(existing_port), None
+
+        # Kill stale socat if it died.
+        if existing_pid:
+            try:
+                os.kill(int(existing_pid), 9)
+            except Exception:
+                pass
+
+        # Pick a free port.
+        used = {int(v.get("port")) for v in data.values() if isinstance(v, dict) and "port" in v}
+        chosen: Optional[int] = None
+        if existing_port and int(existing_port) not in used - {int(existing_port)}:
+            chosen = int(existing_port)
+        else:
+            for p in range(self.start, self.end + 1):
+                if p not in used:
+                    chosen = p
+                    break
+        if chosen is None:
+            return False, None, "no_ports_available"
+
+        # Start socat forwarder on the host.
+        try:
+            proc = subprocess.Popen(
+                [
+                    "socat",
+                    f"TCP-LISTEN:{chosen},fork,reuseaddr",
+                    f"TCP:{container_ip}:22",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            return False, None, "socat_not_installed"
+        except Exception as exc:
+            return False, None, str(exc)
+
+        # Brief settle time then confirm it is still alive.
+        import time as _time
+        _time.sleep(0.3)
+        if not self._is_alive(proc.pid):
+            return False, None, f"socat exited immediately (port {chosen} busy or container unreachable)"
+
+        data[sandbox_id] = {
+            "port": chosen,
+            "socat_pid": proc.pid,
+            "container_ip": container_ip,
+            "allocated_at": _utc_now().isoformat(),
+        }
+        self._save(data)
+        logger.info("socat forwarder started: host:%d -> %s:22 (pid %d)", chosen, container_ip, proc.pid)
+        return True, chosen, None
+
+    def close(self, sandbox_id: str) -> bool:
+        """Kill socat forwarder and release port for sandbox."""
+        data = self._load()
+        row = data.pop(sandbox_id, None)
+        if row is None:
+            return False
+        pid = row.get("socat_pid")
+        if pid:
+            try:
+                os.kill(int(pid), 15)  # SIGTERM
+            except Exception:
+                try:
+                    os.kill(int(pid), 9)
+                except Exception:
+                    pass
+        self._save(data)
+        logger.info("SSH forwarder closed for sandbox '%s'", sandbox_id)
+        return True
+
+    def cleanup_dead_forwarders(self) -> None:
+        """Remove stale entries whose socat processes have already died."""
+        data = self._load()
+        changed = False
+        for sid, row in list(data.items()):
+            pid = row.get("socat_pid")
+            if pid and not self._is_alive(int(pid)):
+                logger.info("Removing stale SSH forwarder record for sandbox '%s' (pid %d dead)", sid, pid)
+                del data[sid]
+                changed = True
+        if changed:
+            self._save(data)
 
 
 class ActionRequest(BaseModel):
@@ -201,7 +288,8 @@ class WebUIServer:
         self.session_ttl = int(auth_cfg.get("session_ttl", 86400))
 
         ssh_cfg = config.get("ssh", {})
-        self.ssh_pool = SSHPortPool(self.root_dir, ssh_cfg.get("port_range", [30200, 30210]))
+        self.ssh_pool = SSHManager(self.root_dir, ssh_cfg.get("port_range", [30200, 30210]))
+        self.ssh_pool.cleanup_dead_forwarders()
         self.sessions = SessionStore(self.root_dir, self.session_ttl)
 
         self.app = self._create_app()
@@ -246,6 +334,28 @@ class WebUIServer:
             checks["kata"] = {"ok": kata.returncode == 0, "detail": detail}
         except Exception as exc:
             checks["kata"] = {"ok": False, "detail": str(exc)}
+
+        # kata-runtime binary can exist while Docker runtime registration is missing.
+        if checks["kata"]["ok"]:
+            try:
+                rt = subprocess.run(
+                    ["docker", "info", "--format", "{{json .Runtimes}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                runtimes_text = (rt.stdout or "").strip()
+                has_kata_runtime = rt.returncode == 0 and '"kata"' in runtimes_text
+                if not has_kata_runtime:
+                    checks["kata"] = {
+                        "ok": False,
+                        "detail": "kata-runtime installed, but Docker runtime 'kata' is not registered",
+                    }
+            except Exception as exc:
+                checks["kata"] = {
+                    "ok": False,
+                    "detail": f"failed to verify Docker runtimes: {exc}",
+                }
 
         return checks
 
@@ -308,6 +418,330 @@ class WebUIServer:
         """Terminate current process after response so systemd can restart service."""
         await asyncio.sleep(max(0.05, float(delay_seconds or 0.0)))
         os.kill(os.getpid(), signal.SIGTERM)
+
+    def _repair_kata_runtime(self) -> Dict[str, Any]:
+        """Try to register Kata runtime in Docker daemon using non-interactive sudo."""
+        report: List[str] = []
+        logger.info("Kata runtime repair requested from Web UI")
+
+        kata_bin = subprocess.run(
+            ["bash", "-lc", "command -v kata-runtime"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        kata_path = (kata_bin.stdout or "").strip()
+        if kata_bin.returncode != 0 or not kata_path:
+            logger.warning("Kata runtime repair failed: kata-runtime not found in PATH")
+            return {
+                "ok": False,
+                "message": "kata-runtime binary is not available",
+                "report": ["kata-runtime not found in PATH"],
+            }
+
+        report.append(f"kata-runtime: {kata_path}")
+        kata_root = Path(kata_path).resolve().parent.parent
+        defaults_dir = (kata_root / "share" / "defaults" / "kata-containers").resolve()
+        cfg_candidates = [
+            defaults_dir / "configuration.toml",
+            defaults_dir / "configuration-qemu.toml",
+            defaults_dir / "configuration-fc.toml",
+            defaults_dir / "configuration-clh.toml",
+        ]
+        chosen_cfg = next((p for p in cfg_candidates if p.exists()), None)
+        etc_cfg = Path("/etc/kata-containers/configuration.toml")
+        custom_kata_root = str(kata_root) != "/opt/kata"
+        kata_root_for_sed = str(kata_root).replace("\\", "\\\\").replace("&", "\\&").replace("#", "\\#")
+
+        cfg_restore_cmd = ""
+        if not etc_cfg.exists() and chosen_cfg is not None:
+            report.append(f"Will restore missing config from {chosen_cfg}")
+            cfg_restore_cmd = (
+                "if [[ ! -f /etc/kata-containers/configuration.toml ]]; then "
+                "sudo -n mkdir -p /etc/kata-containers; "
+                f"sudo -n cp {shlex.quote(str(chosen_cfg))} /etc/kata-containers/configuration.toml; "
+                "fi; "
+            )
+        elif not etc_cfg.exists() and chosen_cfg is None:
+            report.append(
+                "Kata default configuration file was not found near kata-runtime; manual reinstall may be required"
+            )
+
+        cfg_rewrite_needed = False
+        if etc_cfg.exists() and custom_kata_root:
+            try:
+                cfg_text = etc_cfg.read_text(encoding="utf-8", errors="ignore")
+                cfg_rewrite_needed = "/opt/kata/" in cfg_text
+            except Exception:
+                cfg_rewrite_needed = False
+
+        cfg_rewrite_cmd = ""
+        if cfg_rewrite_needed:
+            report.append(f"Will rewrite /opt/kata paths in {etc_cfg} to {kata_root}")
+            cfg_rewrite_cmd = (
+                f"sudo -n sed -i 's#/opt/kata/#{kata_root_for_sed}/#g' /etc/kata-containers/configuration.toml; "
+            )
+
+        cfg_compat_cmd = ""
+        cfg_compat_needed = False
+        low_phys_bits = False
+        phys_bits = 0
+        if etc_cfg.exists():
+            try:
+                cfg_text = etc_cfg.read_text(encoding="utf-8", errors="ignore")
+                cfg_compat_needed = "disable_image_nvdimm = true" not in cfg_text
+            except Exception:
+                cfg_compat_needed = False
+
+        try:
+            cpu_info = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore")
+            match = re.search(r"address sizes\s*:\s*(\d+)\s+bits physical", cpu_info)
+            if match:
+                phys_bits = int(match.group(1))
+                low_phys_bits = 0 < phys_bits <= 36
+        except Exception:
+            low_phys_bits = False
+
+        if low_phys_bits:
+            report.append(f"Detected host physical address width: {phys_bits} bits")
+            report.append("Will apply low phys-bits QEMU compatibility settings")
+
+        if cfg_compat_needed:
+            report.append("Will set disable_image_nvdimm = true for better compatibility on nested/limited phys-bits hosts")
+            cfg_compat_cmd = (
+                "if [[ -f /etc/kata-containers/configuration.toml ]]; then "
+                "if grep -qE '^[[:space:]]*disable_image_nvdimm[[:space:]]*=' /etc/kata-containers/configuration.toml; then "
+                "sudo -n sed -i -E 's/^[[:space:]]*disable_image_nvdimm[[:space:]]*=.*/disable_image_nvdimm = true/' /etc/kata-containers/configuration.toml; "
+                "else "
+                "tmp_kata_cfg=$(mktemp); "
+                "awk 'BEGIN { inserted = 0 } { print; if (!inserted && $0 ~ /^\\[hypervisor\\.qemu\\]$/) { print \"disable_image_nvdimm = true\"; inserted = 1 } }' /etc/kata-containers/configuration.toml > \"$tmp_kata_cfg\"; "
+                "sudo -n mv \"$tmp_kata_cfg\" /etc/kata-containers/configuration.toml; "
+                "fi; "
+                "fi; "
+            )
+
+        low_phys_compat_cmd = ""
+        if low_phys_bits:
+            wrapper_create_cmd = (
+                f"printf '#!/usr/bin/env bash\\nexec {shlex.quote(str(kata_root / 'bin' / 'qemu-system-x86_64'))}"
+                " -global q35-pcihost.pci-hole64-size=1073741824 \"$@\"\\n'"
+                " | sudo -n tee /usr/local/bin/kata-qemu-wrapper >/dev/null; "
+                "sudo -n chmod +x /usr/local/bin/kata-qemu-wrapper; "
+            )
+            low_phys_compat_cmd = (
+                "if [[ -f /etc/kata-containers/configuration.toml ]]; then "
+                "if [[ ! -x /usr/local/bin/kata-qemu-wrapper ]]; then "
+                f"{wrapper_create_cmd}"
+                "fi; "
+                "if grep -qE '^[[:space:]]*machine_type[[:space:]]*=' /etc/kata-containers/configuration.toml; then "
+                "sudo -n sed -i -E 's/^[[:space:]]*machine_type[[:space:]]*=.*/machine_type = \"q35\"/' /etc/kata-containers/configuration.toml; "
+                "fi; "
+                "if grep -qE '^[[:space:]]*memory_slots[[:space:]]*=' /etc/kata-containers/configuration.toml; then "
+                "sudo -n sed -i -E 's/^[[:space:]]*memory_slots[[:space:]]*=.*/memory_slots = 0/' /etc/kata-containers/configuration.toml; "
+                "fi; "
+                "if grep -qE '^[[:space:]]*path[[:space:]]*=[[:space:]]*\".*qemu-system-x86_64\"' /etc/kata-containers/configuration.toml; then "
+                "sudo -n sed -i -E 's#^[[:space:]]*path[[:space:]]*=[[:space:]]*\".*qemu-system-x86_64\"#path = \"/usr/local/bin/kata-qemu-wrapper\"#' /etc/kata-containers/configuration.toml; "
+                "fi; "
+                "if grep -qE '^[[:space:]]*valid_hypervisor_paths[[:space:]]*=' /etc/kata-containers/configuration.toml && ! grep -q '/usr/local/bin/kata-qemu-wrapper' /etc/kata-containers/configuration.toml; then "
+                "sudo -n sed -i -E 's#^[[:space:]]*valid_hypervisor_paths[[:space:]]*=[[:space:]]*\[(.*)\]#valid_hypervisor_paths = [\1, \"/usr/local/bin/kata-qemu-wrapper\"]#' /etc/kata-containers/configuration.toml; "
+                "fi; "
+                "fi; "
+            )
+
+        current = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        current_text = (current.stdout or "").strip()
+        has_kata = current.returncode == 0 and '"kata"' in current_text
+        needs_runtime_registration = not has_kata
+        needs_cfg_restore = bool(cfg_restore_cmd)
+        needs_cfg_rewrite = bool(cfg_rewrite_cmd)
+        needs_cfg_compat = bool(cfg_compat_cmd)
+        needs_low_phys_compat = bool(low_phys_compat_cmd)
+
+        if has_kata:
+            report.append("Docker runtime 'kata' is already registered")
+        else:
+            report.append("Docker runtime 'kata' is not registered")
+
+        if not needs_runtime_registration and not needs_cfg_restore and not needs_cfg_rewrite and not needs_cfg_compat and not needs_low_phys_compat:
+            logger.info("Kata runtime repair skipped: runtime and config already configured")
+            return {
+                "ok": True,
+                "message": "Kata runtime is already configured",
+                "report": report,
+            }
+
+        cmd_parts = ["set -e"]
+        if needs_runtime_registration:
+            cmd_parts.extend([
+                "sudo -n mkdir -p /etc/docker",
+                "if [[ ! -f /etc/docker/daemon.json ]]; then echo '{}' | sudo -n tee /etc/docker/daemon.json >/dev/null; fi",
+                "tmpfile=$(mktemp); jq '. as $cfg | ($cfg.runtimes // {}) as $r | ($r.kata // {}) as $k | $cfg + {runtimes: ($r + {kata: (($k + {runtimeType: \"io.containerd.kata.v2\"}) | del(.path))})}' /etc/docker/daemon.json > \"$tmpfile\"",
+                "sudo -n mv \"$tmpfile\" /etc/docker/daemon.json",
+            ])
+
+        if needs_cfg_restore:
+            cmd_parts.append(cfg_restore_cmd.rstrip(" ;"))
+
+        if needs_cfg_rewrite:
+            cmd_parts.append(cfg_rewrite_cmd.rstrip(" ;"))
+
+        if needs_cfg_compat:
+            cmd_parts.append(cfg_compat_cmd.rstrip(" ;"))
+
+        if needs_low_phys_compat:
+            cmd_parts.append(low_phys_compat_cmd.rstrip(" ;"))
+
+        if needs_runtime_registration:
+            cmd_parts.append("sudo -n systemctl restart docker")
+
+        repair_cmd = "; ".join(cmd_parts)
+
+        attempt = subprocess.run(
+            ["bash", "-lc", repair_cmd],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if attempt.returncode == 0:
+            runtime_ok = True
+            cfg_ok = True
+
+            if needs_runtime_registration:
+                verify = subprocess.run(
+                    ["docker", "info", "--format", "{{json .Runtimes}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                verify_text = (verify.stdout or "").strip()
+                runtime_ok = verify.returncode == 0 and '"kata"' in verify_text
+
+            if needs_cfg_restore:
+                cfg_ok = etc_cfg.exists()
+
+            if needs_cfg_rewrite and cfg_ok:
+                try:
+                    cfg_ok = "/opt/kata/" not in etc_cfg.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    cfg_ok = False
+
+            if needs_cfg_compat and cfg_ok:
+                try:
+                    cfg_ok = "disable_image_nvdimm = true" in etc_cfg.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    cfg_ok = False
+
+            if needs_low_phys_compat and cfg_ok:
+                try:
+                    cfg_text_after = etc_cfg.read_text(encoding="utf-8", errors="ignore")
+                    cfg_ok = (
+                        "path = \"/usr/local/bin/kata-qemu-wrapper\"" in cfg_text_after
+                        and "machine_type = \"q35\"" in cfg_text_after
+                        and "memory_slots = 0" in cfg_text_after
+                    )
+                except Exception:
+                    cfg_ok = False
+
+            if runtime_ok and cfg_ok:
+                report.append("Kata runtime repair steps completed successfully")
+                logger.info("Kata runtime repair completed successfully")
+                return {
+                    "ok": True,
+                    "message": "Kata runtime repaired successfully",
+                    "report": report,
+                }
+
+            if not runtime_ok:
+                report.append("Repair command completed, but runtime still not visible")
+                logger.warning("Kata runtime repair command finished but runtime is still not visible in docker info")
+            if not cfg_ok:
+                report.append("Repair command completed, but /etc/kata-containers/configuration.toml is missing or still contains /opt/kata paths")
+                logger.warning("Kata runtime repair command finished but Kata config is still invalid")
+
+            return {
+                "ok": False,
+                "message": "Repair attempted but not all checks passed",
+                "report": report,
+            }
+
+        err = ((attempt.stderr or "") + "\n" + (attempt.stdout or "")).strip()
+        report.append("Automatic repair failed")
+        if err:
+            report.append(err)
+            logger.warning("Kata runtime automatic repair failed: %s", err)
+
+        manual = [
+            "sudo mkdir -p /etc/docker",
+            "if [ ! -f /etc/docker/daemon.json ]; then echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null; fi",
+            "tmpfile=$(mktemp) && jq '. as $cfg | ($cfg.runtimes // {}) as $r | ($r.kata // {}) as $k | $cfg + {runtimes: ($r + {kata: (($k + {runtimeType: \"io.containerd.kata.v2\"}) | del(.path))})}' /etc/docker/daemon.json > \"$tmpfile\" && sudo mv \"$tmpfile\" /etc/docker/daemon.json",
+            f"if [ ! -f /etc/kata-containers/configuration.toml ]; then for f in {shlex.quote(str(defaults_dir / 'configuration.toml'))} {shlex.quote(str(defaults_dir / 'configuration-qemu.toml'))} {shlex.quote(str(defaults_dir / 'configuration-fc.toml'))} {shlex.quote(str(defaults_dir / 'configuration-clh.toml'))}; do if [ -f \"$f\" ]; then sudo mkdir -p /etc/kata-containers && sudo cp \"$f\" /etc/kata-containers/configuration.toml && break; fi; done; fi",
+            f"if [ -f /etc/kata-containers/configuration.toml ]; then sudo sed -i 's#/opt/kata/#{kata_root_for_sed}/#g' /etc/kata-containers/configuration.toml; fi",
+            "if [ -f /etc/kata-containers/configuration.toml ]; then"
+            " if grep -qE '^[[:space:]]*disable_image_nvdimm[[:space:]]*=' /etc/kata-containers/configuration.toml; then"
+            " sudo sed -i -E 's/^[[:space:]]*disable_image_nvdimm[[:space:]]*=.*/disable_image_nvdimm = true/' /etc/kata-containers/configuration.toml;"
+            " else tmp_kata_cfg=$(mktemp);"
+            " awk 'BEGIN{ins=0}{print; if(!ins && /^\\[hypervisor\\.qemu\\]$/){print \"disable_image_nvdimm = true\"; ins=1}}' /etc/kata-containers/configuration.toml > \"$tmp_kata_cfg\";"
+            " sudo mv \"$tmp_kata_cfg\" /etc/kata-containers/configuration.toml; fi; fi",
+            f"if [ -f /etc/kata-containers/configuration.toml ]; then if [ ! -x /usr/local/bin/kata-qemu-wrapper ]; then"
+            f" printf '#!/usr/bin/env bash\\nexec {shlex.quote(str(kata_root / 'bin' / 'qemu-system-x86_64'))} -global q35-pcihost.pci-hole64-size=1073741824 \"$@\"\\n' | sudo tee /usr/local/bin/kata-qemu-wrapper >/dev/null;"
+            " sudo chmod +x /usr/local/bin/kata-qemu-wrapper; fi; fi",
+            "if [ -f /etc/kata-containers/configuration.toml ]; then sudo sed -i -E 's/^[[:space:]]*machine_type[[:space:]]*=.*/machine_type = \"q35\"/' /etc/kata-containers/configuration.toml; sudo sed -i -E 's/^[[:space:]]*memory_slots[[:space:]]*=.*/memory_slots = 0/' /etc/kata-containers/configuration.toml; sudo sed -i -E 's#^[[:space:]]*path[[:space:]]*=[[:space:]]*\".*qemu-system-x86_64\"#path = \"/usr/local/bin/kata-qemu-wrapper\"#' /etc/kata-containers/configuration.toml; if grep -qE '^[[:space:]]*valid_hypervisor_paths[[:space:]]*=' /etc/kata-containers/configuration.toml && ! grep -q '/usr/local/bin/kata-qemu-wrapper' /etc/kata-containers/configuration.toml; then sudo sed -i -E 's#^[[:space:]]*valid_hypervisor_paths[[:space:]]*=[[:space:]]*\[(.*)\]#valid_hypervisor_paths = [\1, \"/usr/local/bin/kata-qemu-wrapper\"]#' /etc/kata-containers/configuration.toml; fi; fi",
+            "sudo systemctl restart docker",
+            "docker info --format '{{json .Runtimes}}'",
+        ]
+
+        logger.warning("Kata runtime auto-repair needs manual steps. Run the following commands:")
+        for cmd in manual:
+            logger.warning("MANUAL_REPAIR_CMD: %s", cmd)
+
+        return {
+            "ok": False,
+            "message": "Automatic repair requires sudo permissions",
+            "report": report,
+            "manual_commands": manual,
+        }
+
+    def _read_system_log(self, lines: int = 200) -> Dict[str, Any]:
+        """Read recent service logs with user/system journal fallback."""
+        limit = max(20, min(2000, int(lines or 200)))
+        candidates = [
+            ("user", ["journalctl", "--user", "-u", "sndbx", "-n", str(limit), "--no-pager", "-o", "short-iso"]),
+            ("system", ["journalctl", "-u", "sndbx", "-n", str(limit), "--no-pager", "-o", "short-iso"]),
+        ]
+
+        last_error = "log source unavailable"
+        for source, cmd in candidates:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+
+            if proc.returncode == 0:
+                return {
+                    "ok": True,
+                    "source": source,
+                    "lines": limit,
+                    "text": (proc.stdout or "").rstrip(),
+                }
+
+            detail = (proc.stderr or proc.stdout or "").strip()
+            if detail:
+                last_error = detail
+
+        return {
+            "ok": False,
+            "source": "none",
+            "lines": limit,
+            "text": "",
+            "error": last_error,
+        }
 
     def _create_app(self) -> FastAPI:
         """Build FastAPI app with auth, status and action endpoints."""
@@ -384,11 +818,28 @@ class WebUIServer:
                 return {"ok": ok, "message": out}
 
             if action == "ssh_open":
-                ok, port, err = self.ssh_pool.reserve(sandbox_id)
-                return {"ok": ok, "ssh_port": port, "error": err}
+                sandbox_cfg = self.sandbox_manager.sandbox_configs.get(sandbox_id, {})
+                authorized_keys = [k for k in sandbox_cfg.get("ssh_keys", []) if isinstance(k, str) and k.strip()]
+                if not authorized_keys:
+                    return {"ok": False, "error": "no_ssh_keys",
+                            "message": "No SSH keys configured. Add public keys to ssh_keys in config.json5."}
+                status = self.sandbox_manager.get_status(sandbox_id)
+                if not status.running:
+                    return {"ok": False, "error": "sandbox_not_running",
+                            "message": "Sandbox is not running. Start it first."}
+                container_ip = self.sandbox_manager.get_container_ip(sandbox_id)
+                if not container_ip:
+                    return {"ok": False, "error": "no_container_ip",
+                            "message": "Could not determine container IP address."}
+                setup_ok, setup_msg = self.sandbox_manager.exec_ssh_setup(sandbox_id, authorized_keys)
+                if not setup_ok:
+                    return {"ok": False, "error": "ssh_setup_failed", "message": setup_msg}
+                ok, port, err = self.ssh_pool.open(sandbox_id, container_ip)
+                return {"ok": ok, "ssh_port": port, "error": err,
+                        "message": f"SSH ready. Connect: ssh root@<host> -p {port}" if ok else err}
 
             if action == "ssh_close":
-                ok = self.ssh_pool.release(sandbox_id)
+                ok = self.ssh_pool.close(sandbox_id)
                 return {"ok": ok}
 
             raise HTTPException(status_code=400, detail="Unknown action")
@@ -398,23 +849,37 @@ class WebUIServer:
             asyncio.create_task(self._restart_service_soon())
             return {"ok": True, "message": "Service restart scheduled"}
 
+        @app.get("/api/system-log")
+        async def system_log(lines: int = 200, session: Dict[str, Any] = Depends(self._require_session)):
+            return self._read_system_log(lines)
+
+        @app.post("/api/runtime/kata/repair")
+        async def repair_kata_runtime(session: Dict[str, Any] = Depends(self._require_session)):
+            return self._repair_kata_runtime()
+
         @app.websocket("/ws/console/{sandbox_id}")
         async def ws_console(websocket: WebSocket, sandbox_id: str):
             """Interactive shell bridge to sandbox container via PTY and docker exec."""
+            # Must accept before any close/send in Starlette.
+            await websocket.accept()
+
             token = websocket.cookies.get("sndbx_session", "")
             session = self.sessions.get(token)
             if not session:
+                logger.warning("ws_console: invalid/missing session cookie for sandbox '%s'", sandbox_id)
+                await websocket.send_text("\r\n[sndbx] Authentication required. Please log in again.\r\n")
                 await websocket.close(code=4001)
                 return
 
             # Ensure sandbox is running before opening terminal session.
+            logger.info("ws_console: ensuring sandbox '%s' is running", sandbox_id)
             if not self._ensure_sandbox_running(sandbox_id):
-                await websocket.accept()
+                logger.warning("ws_console: could not start sandbox '%s'", sandbox_id)
                 await websocket.send_text("\r\n[sndbx] Unable to start sandbox for console session.\r\n")
                 await websocket.close(code=1011)
                 return
 
-            await websocket.accept()
+            logger.info("ws_console: sandbox '%s' ready, opening PTY", sandbox_id)
 
             master_fd, slave_fd = pty.openpty()
             proc = subprocess.Popen(

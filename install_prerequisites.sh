@@ -365,6 +365,215 @@ ensure_docker_data_root() {
   fi
 }
 
+# host_phys_bits: detect host physical address bits from /proc/cpuinfo.
+# input: none
+# output: physical address bits, default 0 when unknown
+host_phys_bits() {
+  local first_line
+  local bits
+
+  first_line="$(grep -m1 'address sizes' /proc/cpuinfo 2>/dev/null || true)"
+  bits="$(sed -n -E 's/.*: *([0-9]+) bits physical.*/\1/p' <<< "$first_line")"
+
+  if [[ -n "$bits" ]]; then
+    echo "$bits"
+  else
+    echo 0
+  fi
+}
+
+# ensure_kata_phys_bits_compat: apply Kata/QEMU compatibility fixes on low phys-bits hosts.
+# input: path to /etc/kata-containers/configuration.toml
+# output: returns success and prints 1 when config changed, otherwise 0
+ensure_kata_phys_bits_compat() {
+  local cfg_file="$1"
+  local changed=0
+  local phys_bits
+  local wrapper_path="/usr/local/bin/kata-qemu-wrapper"
+  local qemu_path="${KATA_PATH}/bin/qemu-system-x86_64"
+
+  phys_bits="$(host_phys_bits)"
+
+  if [[ ! -f "$cfg_file" ]]; then
+    echo 0
+    return 0
+  fi
+
+  # Always avoid nvdimm image mapping on constrained hosts.
+  if grep -qE '^[[:space:]]*disable_image_nvdimm[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$cfg_file"; then
+    :
+  elif grep -qE '^[[:space:]]*disable_image_nvdimm[[:space:]]*=' "$cfg_file"; then
+    run_sudo sed -i -E 's/^[[:space:]]*disable_image_nvdimm[[:space:]]*=.*/disable_image_nvdimm = true/' "$cfg_file"
+    changed=1
+  else
+    run_sudo awk '
+      BEGIN { inserted = 0 }
+      {
+        print
+        if (!inserted && $0 ~ /^\[hypervisor\.qemu\]$/) {
+          print "disable_image_nvdimm = true"
+          inserted = 1
+        }
+      }
+    ' "$cfg_file" > /tmp/kata_cfg.$$ && run_sudo mv /tmp/kata_cfg.$$ "$cfg_file"
+    changed=1
+  fi
+
+  if [[ "$phys_bits" -gt 0 && "$phys_bits" -le 36 ]]; then
+    print_warn "Detected low physical address width (${phys_bits} bits). Applying Kata QEMU compatibility fixes."
+
+    if [[ ! -x "$wrapper_path" ]]; then
+      run_sudo tee "$wrapper_path" >/dev/null <<EOF
+#!/usr/bin/env bash
+exec ${qemu_path} \
+  -global q35-pcihost.pci-hole64-size=1073741824 \
+  "\$@"
+EOF
+      run_sudo chmod +x "$wrapper_path"
+      changed=1
+    fi
+
+    if grep -qE '^[[:space:]]*machine_type[[:space:]]*=[[:space:]]*"q35"[[:space:]]*$' "$cfg_file"; then
+      :
+    elif grep -qE '^[[:space:]]*machine_type[[:space:]]*=' "$cfg_file"; then
+      run_sudo sed -i -E 's/^[[:space:]]*machine_type[[:space:]]*=.*/machine_type = "q35"/' "$cfg_file"
+      changed=1
+    fi
+
+    if grep -qE '^[[:space:]]*memory_slots[[:space:]]*=[[:space:]]*0[[:space:]]*$' "$cfg_file"; then
+      :
+    elif grep -qE '^[[:space:]]*memory_slots[[:space:]]*=' "$cfg_file"; then
+      run_sudo sed -i -E 's/^[[:space:]]*memory_slots[[:space:]]*=.*/memory_slots = 0/' "$cfg_file"
+      changed=1
+    fi
+
+    if grep -qE '^[[:space:]]*path[[:space:]]*=[[:space:]]*"/usr/local/bin/kata-qemu-wrapper"[[:space:]]*$' "$cfg_file"; then
+      :
+    elif grep -qE '^[[:space:]]*path[[:space:]]*=[[:space:]]*".*qemu-system-x86_64"[[:space:]]*$' "$cfg_file"; then
+      run_sudo sed -i -E 's#^[[:space:]]*path[[:space:]]*=[[:space:]]*".*qemu-system-x86_64"#path = "/usr/local/bin/kata-qemu-wrapper"#' "$cfg_file"
+      changed=1
+    fi
+
+    if grep -q '/usr/local/bin/kata-qemu-wrapper' "$cfg_file"; then
+      :
+    elif grep -qE '^[[:space:]]*valid_hypervisor_paths[[:space:]]*=[[:space:]]*\[' "$cfg_file"; then
+      run_sudo sed -i -E 's#^[[:space:]]*valid_hypervisor_paths[[:space:]]*=[[:space:]]*\[(.*)\]#valid_hypervisor_paths = [\1, "/usr/local/bin/kata-qemu-wrapper"]#' "$cfg_file"
+      changed=1
+    fi
+  fi
+
+  echo "$changed"
+}
+
+# ensure_docker_kata_runtime: register Kata runtime in Docker daemon config.
+# input: none
+# output: updates /etc/docker/daemon.json and restarts docker when changed
+ensure_docker_kata_runtime() {
+  local daemon_file="/etc/docker/daemon.json"
+  local tmpfile
+  local changed=0
+  local defaults_dir
+  local chosen_cfg=""
+  local cand
+  local cfg_changed
+
+  defaults_dir="${KATA_PATH}/share/defaults/kata-containers"
+
+  run_sudo mkdir -p /etc/docker
+  if [[ ! -f "$daemon_file" ]]; then
+    echo '{}' | run_sudo tee "$daemon_file" >/dev/null
+  fi
+
+  tmpfile="$(mktemp)"
+  jq '
+    . as $cfg
+    | ($cfg.runtimes // {}) as $r
+    | ($r.kata // {}) as $k
+    | $cfg + {runtimes: ($r + {kata: (($k + {runtimeType: "io.containerd.kata.v2"}) | del(.path))})}
+  ' "$daemon_file" > "$tmpfile"
+
+  if ! cmp -s "$tmpfile" "$daemon_file"; then
+    run_sudo mv "$tmpfile" "$daemon_file"
+    changed=1
+    print_info "Registered Docker runtime 'kata' -> io.containerd.kata.v2"
+  else
+    rm -f "$tmpfile"
+    print_info "Docker runtime 'kata' is already configured"
+  fi
+
+  if [[ ! -f /etc/kata-containers/configuration.toml ]]; then
+    for cand in \
+      "$defaults_dir/configuration.toml" \
+      "$defaults_dir/configuration-qemu.toml" \
+      "$defaults_dir/configuration-fc.toml" \
+      "$defaults_dir/configuration-clh.toml"; do
+      if [[ -f "$cand" ]]; then
+        chosen_cfg="$cand"
+        break
+      fi
+    done
+
+    if [[ -n "$chosen_cfg" ]]; then
+      run_sudo mkdir -p /etc/kata-containers
+      run_sudo cp "$chosen_cfg" /etc/kata-containers/configuration.toml
+      print_info "Installed Kata config: /etc/kata-containers/configuration.toml (source: $chosen_cfg)"
+      changed=1
+    else
+      print_warn "Could not find Kata default configuration in $defaults_dir"
+      print_warn "Create /etc/kata-containers/configuration.toml manually from available configuration-*.toml"
+    fi
+  fi
+
+  # If Kata is installed in a custom path, update default /opt/kata paths in config.
+  if [[ -f /etc/kata-containers/configuration.toml && "$KATA_PATH" != "/opt/kata" ]]; then
+    if grep -q '/opt/kata/' /etc/kata-containers/configuration.toml; then
+      local escaped_kata
+      escaped_kata="$(printf '%s' "$KATA_PATH" | sed 's/[\/&]/\\&/g')"
+      run_sudo sed -i "s#/opt/kata/#${escaped_kata}/#g" /etc/kata-containers/configuration.toml
+      print_info "Rewrote /opt/kata paths in /etc/kata-containers/configuration.toml to $KATA_PATH"
+      changed=1
+    fi
+  fi
+
+  if [[ -f /etc/kata-containers/configuration.toml ]]; then
+    cfg_changed="$(ensure_kata_phys_bits_compat /etc/kata-containers/configuration.toml)"
+    if [[ "$cfg_changed" == "1" ]]; then
+      print_info "Applied Kata hypervisor compatibility settings"
+      changed=1
+    fi
+  fi
+
+  if [[ "$changed" -eq 1 ]]; then
+    if run_sudo timeout 30 systemctl restart docker; then
+      print_info "Docker restarted successfully after runtime update."
+    else
+      print_warn "Docker restart timed out or failed. Check: sudo systemctl status docker --no-pager -l"
+    fi
+  fi
+}
+
+# verify_kata_runtime_ready: ensure Docker+Kata integration is actually usable.
+# input: none
+# output: exits with error on incomplete setup
+verify_kata_runtime_ready() {
+  local runtimes_json
+
+  if ! test -f /etc/kata-containers/configuration.toml; then
+    print_error "Missing /etc/kata-containers/configuration.toml"
+    print_error "Fix by copying one of ${KATA_PATH}/share/defaults/kata-containers/configuration-*.toml"
+    exit 1
+  fi
+
+  runtimes_json="$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
+  if [[ "$runtimes_json" != *'"kata"'* ]]; then
+    print_error "Docker runtime 'kata' is not visible in docker info"
+    print_error "Check /etc/docker/daemon.json runtimes.kata.runtimeType and restart docker"
+    exit 1
+  fi
+
+  print_info "Kata runtime integration is ready (docker runtime + configuration.toml)."
+}
+
 # verify_kvm_support: check KVM prerequisites and fail on unsupported setup.
 # input: none
 # output: exits on KVM verification failure
@@ -508,6 +717,7 @@ main() {
     jq
     tar
     zstd
+    socat
     qemu-system-x86
     qemu-utils
     cpu-checker
@@ -525,6 +735,8 @@ main() {
   ensure_user_in_docker_group
   verify_kvm_support
   install_kata_if_missing
+  ensure_docker_kata_runtime
+  verify_kata_runtime_ready
 
   print_info "Prerequisites are installed and verified."
 }
