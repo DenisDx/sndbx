@@ -882,8 +882,21 @@ class WebUIServer:
             logger.info("ws_console: sandbox '%s' ready, opening PTY", sandbox_id)
 
             master_fd, slave_fd = pty.openpty()
+            prompt = f"[sndbx:{sandbox_id}] \\u@\\h:\\w\\$ "
             proc = subprocess.Popen(
-                ["docker", "exec", "-i", f"sndbx-{sandbox_id}", "bash"],
+                [
+                    "docker",
+                    "exec",
+                    "-i",
+                    "-e",
+                    "TERM=xterm-256color",
+                    "-e",
+                    f"PS1={prompt}",
+                    f"sndbx-{sandbox_id}",
+                    "bash",
+                    "-lc",
+                    "exec bash -i",
+                ],
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,

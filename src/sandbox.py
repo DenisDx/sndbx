@@ -79,6 +79,32 @@ class DockerSandboxManager:
         text = (output or "").lower()
         return "configuration.toml" in text and "does not exist" in text
 
+    # Aliyun mirror is fast from this host (~2.8 MB/s vs ~10 KB/s from archive.ubuntu.com).
+    # Applied once at container creation; keeps indices in tmpfs so writes are in-memory.
+    APT_MIRROR = "http://mirrors.aliyun.com/ubuntu"
+    APT_SECURITY_MIRROR = "http://mirrors.aliyun.com/ubuntu"
+
+    def configure_apt_mirror(self, sandbox_id: str) -> tuple[bool, str]:
+        """Replace /etc/apt/sources.list with the fast Aliyun mirror."""
+        sources = (
+            f"deb {self.APT_MIRROR} jammy main restricted universe multiverse\n"
+            f"deb {self.APT_MIRROR} jammy-updates main restricted universe multiverse\n"
+            f"deb {self.APT_MIRROR} jammy-backports main restricted universe multiverse\n"
+            f"deb {self.APT_SECURITY_MIRROR} jammy-security main restricted universe multiverse\n"
+        )
+        script = f"cat > /etc/apt/sources.list << 'SNDBX_SOURCES'\n{sources}SNDBX_SOURCES\n"
+        try:
+            result = subprocess.run(
+                ['docker', 'exec', f'sndbx-{sandbox_id}', 'bash', '-c', script],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                logger.info("Configured apt mirror in sandbox '%s'", sandbox_id)
+                return True, "mirror configured"
+            return False, (result.stdout + result.stderr).strip()
+        except Exception as exc:
+            return False, str(exc)
+
     def get_container_ip(self, sandbox_id: str) -> Optional[str]:
         """Return Docker bridge IP for a running sandbox container, or None."""
         ok, out = self._run_docker_cmd([
@@ -176,6 +202,14 @@ pkill -x sshd || true
         # Reserved for future implementation. For now this is a config-only field.
         _network_traffic_max = sandbox_cfg.get('network_traffic_max')
         
+        # Mount apt directories as tmpfs to avoid virtiofs overhead for small-file writes.
+        # The sandbox rootfs is virtiofs-backed (host overlay → virtiofsd → guest), so
+        # apt update writing hundreds of index files is very slow without this.
+        apt_tmpfs_args = [
+            '--tmpfs', '/var/lib/apt/lists:rw,exec',
+            '--tmpfs', '/var/cache/apt:rw,exec',
+        ]
+
         base_cmd = [
             'run',
             '--name', f'sndbx-{sandbox_id}',
@@ -183,6 +217,7 @@ pkill -x sshd || true
             '-m', memory,
             '--cpus', str(cpus),
             '--detach',
+            *apt_tmpfs_args,
             image,
             'sleep', 'infinity'  # Keep container running
         ]
@@ -197,6 +232,7 @@ pkill -x sshd || true
                 '--cpus', str(cpus),
                 '--detach',
                 '--storage-opt', f'size={disk_max}',
+                *apt_tmpfs_args,
                 image,
                 'sleep', 'infinity'  # Keep container running
             ]
@@ -248,6 +284,11 @@ pkill -x sshd || true
                     "or install prerequisites again to restore configuration.toml."
                 )
             logger.error(f"Failed to create sandbox {sandbox_id}: {output}")
+
+        if success:
+            mirror_ok, mirror_msg = self.configure_apt_mirror(sandbox_id)
+            if not mirror_ok:
+                logger.warning("apt mirror config failed for sandbox '%s': %s", sandbox_id, mirror_msg)
 
         return success, output
 

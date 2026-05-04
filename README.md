@@ -468,6 +468,31 @@ The `config.json5` file defines sandboxes, users, and MCP settings:
 - Test manual Docker run: `docker run --rm --runtime kata alpine echo "test"`
 - If `docker run --runtime kata ...` fails with `Cannot find usable config file` or exit code `125`, restore `/etc/kata-containers/configuration.toml` from Kata defaults (see "Verify Installation" section above)
 
+### apt commands inside sandbox are very slow
+
+**Symptom**: `apt-get update` or `apt install` takes several minutes inside the sandbox.
+
+**Root cause**: The default `archive.ubuntu.com` repository may be throttled or blocked on your network (commonly observed in Asia and some corporate environments). Network traffic is routed through the Kata VM's virtual NIC with NAT, so the bottleneck is the repository connection speed, not virtiofs or disk I/O.
+
+**Fix applied automatically**: sndbx configures `mirrors.aliyun.com` as the apt mirror in every newly created sandbox (`/etc/apt/sources.list` is rewritten at container creation time). This brings `apt-get update` from ~2.5 minutes down to ~11 seconds and `apt install python3` from several minutes to ~20 seconds on affected hosts.
+
+**For existing sandboxes** (already created before this fix was applied), reconfigure manually:
+
+```bash
+docker exec sndbx-<sandbox_id> bash -c '
+cat > /etc/apt/sources.list << "EOF"
+deb http://mirrors.aliyun.com/ubuntu jammy main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu jammy-updates main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu jammy-backports main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu jammy-security main restricted universe multiverse
+EOF
+'
+```
+
+Or recreate the sandbox via Web UI / MCP to have the mirror applied automatically.
+
+**To use a different mirror**, change `APT_MIRROR` and `APT_SECURITY_MIRROR` in [src/sandbox.py](src/sandbox.py) and restart the service.
+
 ### Token authentication fails
 
 - Verify token in `.env` and MCP request match exactly
