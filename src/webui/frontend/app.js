@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 let refreshTimer = null;
 let logTimer = null;
 let term = null;
+let fitAddon = null;
 let termSocket = null;
 let consoleLoaded = false;
 let termDataDisposable = null;
@@ -31,6 +32,8 @@ function showPage(name) {
 
   if (name === "console") {
     initConsole();
+    // Resize to actual element size when tab becomes visible.
+    if (fitAddon) fitAddon.fit();
   }
 }
 
@@ -108,6 +111,16 @@ function sshButtons(sandboxId) {
   ].join("");
 }
 
+function imageButtons(imageRef) {
+  const mk = (label, action) =>
+    `<button onclick="runImageAction('${escapeHtml(imageRef)}','${action}')">${label}</button>`;
+  return [
+    mk("Build", "build"),
+    mk("Rebuild", "rebuild"),
+    mk("Update", "update"),
+  ].join("");
+}
+
 function renderStartupFlag(enabled) {
   return enabled
     ? `<span class="badge ok">YES</span>`
@@ -141,6 +154,40 @@ function renderContainers(containers) {
   });
 }
 
+function yesNoBadge(flag) {
+  return flag
+    ? `<span class="badge ok">YES</span>`
+    : `<span class="badge bad">NO</span>`;
+}
+
+function renderImages(images) {
+  const body = $("images-body");
+  if (!body) return;
+  body.innerHTML = "";
+
+  if (!images || images.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="7" class="muted">No configured images found</td>`;
+    body.appendChild(tr);
+    return;
+  }
+
+  images.forEach((img) => {
+    const tr = document.createElement("tr");
+    const refs = Array.isArray(img.sandboxes) ? img.sandboxes.join(", ") : "";
+    tr.innerHTML = `
+      <td>${escapeHtml(img.image || "")}</td>
+      <td>${escapeHtml(img.path || "—")}</td>
+      <td>${yesNoBadge(!!img.built)}</td>
+      <td>${yesNoBadge(!!img.has_dockerfile)}</td>
+      <td>${yesNoBadge(!!img.has_app_py)}</td>
+      <td>${escapeHtml(refs || "—")}</td>
+      <td><div class="actions">${imageButtons(img.image || "")}</div></td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
 function setDashMessage(text, ok = false) {
   const el = $("dash-message");
   el.textContent = text || "";
@@ -158,6 +205,28 @@ async function runAction(sandboxId, action) {
   await loadDashboard();
 }
 window.runAction = runAction;
+
+async function runImageAction(imageRef, action) {
+  const actionName = (action || "").toLowerCase();
+  const verb = actionName === "build" ? "Build" : "Rebuild";
+
+  setDashMessage(`${verb} started for image '${imageRef}'...`, false);
+  appendLocalLogLine(`[webui] ${verb} started for image '${imageRef}'`);
+
+  const res = await apiPost(`/api/image/${encodeURIComponent(imageRef)}/action`, { action });
+  const payloadOk = !!(res.data && res.data.ok);
+  if (!res.ok || !payloadOk) {
+    const errMsg = (res.data && (res.data.message || res.data.detail || res.data.error)) || "Image action failed";
+    setDashMessage(errMsg, false);
+    appendLocalLogLine(`[webui] ${verb} failed for image '${imageRef}': ${errMsg}`);
+    return;
+  }
+  const okMsg = (res.data && res.data.message) || "Image action completed";
+  setDashMessage(okMsg, true);
+  appendLocalLogLine(`[webui] ${verb} finished for image '${imageRef}'`);
+  await loadDashboard();
+}
+window.runImageAction = runImageAction;
 
 async function restartService() {
   if (!window.confirm("Restart sndbx service now?")) {
@@ -189,6 +258,7 @@ async function loadDashboard() {
   setServiceIndicator("Online", "ok");
   renderHealth(data.health || {});
   renderContainers(data.containers || []);
+  renderImages(data.images || []);
   $("whoami").textContent = data.session && data.session.login ? `User: ${data.session.login}` : "";
 }
 
@@ -197,6 +267,21 @@ function setLogMeta(text, ok = true) {
   if (!el) return;
   el.textContent = text || "";
   el.style.color = ok ? "var(--muted)" : "var(--err)";
+}
+
+function appendLocalLogLine(text) {
+  const out = $("system-log-output");
+  if (!out || !text) return;
+
+  const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const line = `[${ts}] ${text}`;
+  const prefix = out.textContent && !out.textContent.endsWith("\n") ? "\n" : "";
+  out.textContent += prefix + line;
+
+  const autoScroll = $("log-auto-scroll");
+  if (autoScroll && autoScroll.checked) {
+    out.scrollTop = out.scrollHeight;
+  }
 }
 
 async function loadSystemLog() {
@@ -398,7 +483,24 @@ function initConsole() {
     fontSize: 13,
     scrollback: 2000,
   });
+
+  // FitAddon: auto-resize terminal to container element size.
+  const FitAddonClass = window.FitAddon?.FitAddon;
+  if (FitAddonClass) {
+    fitAddon = new FitAddonClass();
+    term.loadAddon(fitAddon);
+  }
+
   term.open($("console-terminal"));
+  if (fitAddon) fitAddon.fit();
+
+  // Notify backend whenever xterm reports a dimension change.
+  term.onResize(({ cols, rows }) => {
+    if (termSocket && termSocket.readyState === WebSocket.OPEN) {
+      termSocket.send(JSON.stringify({ type: "resize", cols, rows }));
+    }
+  });
+
   term.writeln("sndbx console ready. Select sandbox and click Connect.\r\n");
 
   $("console-connect-btn").addEventListener("click", connectConsole);
@@ -460,6 +562,10 @@ function connectConsole() {
         termSocket.send(data);
       }
     });
+
+    // Force initial terminal size sync so first render is full-size without manual window resize.
+    syncConsoleSizeToBackend();
+    window.setTimeout(syncConsoleSizeToBackend, 120);
   };
 
   termSocket.onmessage = (evt) => {
@@ -491,6 +597,18 @@ function disconnectConsole() {
   }
 }
 
+function syncConsoleSizeToBackend() {
+  if (!term || !termSocket || termSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  if (fitAddon) {
+    fitAddon.fit();
+  }
+
+  termSocket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+}
+
 $("login-btn").addEventListener("click", onLogin);
 $("pass-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") onLogin();
@@ -500,6 +618,11 @@ $("login-input").addEventListener("keydown", (e) => {
 });
 $("logoff-btn").addEventListener("click", onLogout);
 $("restart-service-btn").addEventListener("click", restartService);
+
+// Re-fit terminal on window resize so cols/rows stay in sync.
+window.addEventListener("resize", () => {
+  if (fitAddon) fitAddon.fit();
+});
 
 (async () => {
   const me = await apiGet("/api/auth/me");

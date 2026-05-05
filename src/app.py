@@ -66,6 +66,9 @@ class SNDBXApp:
             self.sandbox_manager = DockerSandboxManager(self.config)
             self.logger.info("Sandbox manager initialized")
 
+            # Build local images used by configured sandboxes when not yet built.
+            self._build_startup_images()
+
             # Start sandboxes that are marked to run at startup.
             self._start_startup_sandboxes()
 
@@ -88,6 +91,21 @@ class SNDBXApp:
         except Exception as e:
             self.logger.exception(f"Failed to start application: {e}")
             raise
+
+    def _build_startup_images(self):
+        """Build local images/<id> images that are not yet present in Docker."""
+        items = self.config.get('sandboxes', {}).get('items', {})
+        seen: set = set()
+        for sandbox_id, sandbox_cfg in items.items():
+            image_ref = str(sandbox_cfg.get('image', '')).strip()
+            if not image_ref or image_ref in seen:
+                continue
+            seen.add(image_ref)
+            ok, msg = self.sandbox_manager._ensure_image_ready(image_ref)
+            if ok:
+                self.logger.info("Image ready: '%s'", image_ref)
+            else:
+                self.logger.warning("Image '%s': %s", image_ref, msg)
 
     def _start_startup_sandboxes(self):
         """Create/start configured sandboxes with run_at_startup=true."""

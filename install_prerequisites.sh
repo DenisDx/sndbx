@@ -5,26 +5,61 @@ set -euo pipefail
 KATA_PATH="/opt/kata"
 DOCKER_PATH=""
 TMP_PATH="/tmp"
+KATA_ARCHIVE=""  # pre-downloaded archive path (--kata_archive)
+APT_MIRROR=""    # host apt mirror override (--apt_mirror)
+
+# Color support when stdout is a terminal.
+if [[ -t 1 ]]; then
+  _C_RED='\033[0;31m'; _C_GREEN='\033[0;32m'; _C_YELLOW='\033[1;33m'
+  _C_BLUE='\033[0;36m'; _C_BOLD='\033[1m'; _C_NC='\033[0m'
+else
+  _C_RED=''; _C_GREEN=''; _C_YELLOW=''; _C_BLUE=''; _C_BOLD=''; _C_NC=''
+fi
+
+_STEP=0
+
+# print_step: print a numbered section header.
+# input: step description
+# output: formatted header to stdout
+print_step() {
+  _STEP=$(( _STEP + 1 ))
+  echo ""
+  echo -e "${_C_BLUE}${_C_BOLD}━━━ Step ${_STEP}: $* ━━━${_C_NC}"
+}
 
 # print_info: print an informational message.
 # input: message string
 # output: text to stdout
 print_info() {
-  echo "[INFO] $*"
+  echo -e "  [INFO] $*"
+}
+
+# print_ok: print a success confirmation.
+# input: message string
+# output: text to stdout
+print_ok() {
+  echo -e "  ${_C_GREEN}[ OK ]${_C_NC} $*"
 }
 
 # print_warn: print a warning message.
 # input: message string
 # output: text to stdout
 print_warn() {
-  echo "[WARN] $*"
+  echo -e "  ${_C_YELLOW}[WARN]${_C_NC} $*"
 }
 
 # print_error: print an error message.
 # input: message string
 # output: text to stderr
 print_error() {
-  echo "[ERROR] $*" >&2
+  echo -e "  ${_C_RED}[ERR ]${_C_NC} $*" >&2
+}
+
+# print_hint: print an actionable suggestion after an error.
+# input: hint text
+# output: text to stderr
+print_hint() {
+  echo -e "  ${_C_YELLOW}      ➜ $*${_C_NC}" >&2
 }
 
 # show_help: print script usage and options.
@@ -33,13 +68,16 @@ print_error() {
 show_help() {
   cat <<'EOF'
 Usage:
-  ./install_prerequisites.sh [--kata_path <path>] [--docker_path <path>] [--help]
+  ./install_prerequisites.sh [OPTIONS]
 
 Options:
-  --kata_path <path>    Install Kata into custom path (default: /opt/kata).
-  --docker_path <path>  Set Docker data-root to custom path (no Docker reinstall).
-  --tmp_path <path>     Use custom directory for temporary files (default: /tmp).
-  --help                Show this help and exit.
+  --kata_path <path>      Install Kata into custom path (default: /opt/kata).
+  --docker_path <path>    Set Docker data-root to custom path (no Docker reinstall).
+  --tmp_path <path>       Use custom directory for temporary files (default: /tmp).
+  --kata_archive <path>   Use pre-downloaded Kata .tar.zst archive (skip download).
+  --apt_mirror <url>      Override apt mirror for host package installs.
+                          Example: http://mirrors.aliyun.com/ubuntu
+  --help                  Show this help and exit.
 EOF
 }
 
@@ -73,6 +111,22 @@ parse_args() {
         TMP_PATH="$2"
         shift 2
         ;;
+      --kata_archive)
+        if [[ $# -lt 2 ]]; then
+          print_error "--kata_archive requires a value."
+          exit 1
+        fi
+        KATA_ARCHIVE="$2"
+        shift 2
+        ;;
+      --apt_mirror)
+        if [[ $# -lt 2 ]]; then
+          print_error "--apt_mirror requires a value."
+          exit 1
+        fi
+        APT_MIRROR="$2"
+        shift 2
+        ;;
       --help|-h)
         show_help
         exit 0
@@ -102,23 +156,29 @@ require_absolute_path() {
 # input: none
 # output: summary text to stdout
 show_startup_summary() {
+  echo ""
   echo "This script will:"
-  echo "- Install only missing prerequisite packages"
-  echo "- Enable/start Docker only when needed"
-  echo "- Add current user to docker group only when missing"
-  echo "- Verify KVM support"
-  echo "- Install Kata only when missing"
+  echo "  - Verify sudo access and KVM hardware virtualization support"
+  echo "  - Install only missing prerequisite packages"
+  echo "  - Enable/start Docker only when needed"
+  echo "  - Add current user to docker group only when missing"
+  echo "  - Install Kata Containers only when missing"
+  echo "  - Register Kata runtime with Docker"
   echo ""
-  echo "Options:"
-  echo "- --kata_path <path>   (current: $KATA_PATH)"
+  echo "Options in effect:"
+  printf "  %-22s %s\n" "--kata_path" "$KATA_PATH"
   if [[ -n "$DOCKER_PATH" ]]; then
-    echo "- --docker_path <path> (current: $DOCKER_PATH)"
-  else
-    echo "- --docker_path <path> (current: not set)"
+    printf "  %-22s %s\n" "--docker_path" "$DOCKER_PATH"
   fi
-  echo "- --tmp_path <path>    (current: $TMP_PATH)"
+  printf "  %-22s %s\n" "--tmp_path" "$TMP_PATH"
+  if [[ -n "$KATA_ARCHIVE" ]]; then
+    printf "  %-22s %s\n" "--kata_archive" "$KATA_ARCHIVE  (offline install)"
+  fi
+  if [[ -n "$APT_MIRROR" ]]; then
+    printf "  %-22s %s\n" "--apt_mirror" "$APT_MIRROR"
+  fi
   echo ""
-  echo "Press Y to continue. Press Enter (or any other key) to cancel."
+  echo "Press Y to continue, Enter to cancel."
 }
 
 # confirm_execution: ask for interactive confirmation.
@@ -144,6 +204,41 @@ run_sudo() {
   fi
 }
 
+# check_sudo_access: verify sudo is available before starting work.
+# input: none
+# output: exits with actionable message when sudo is unavailable
+check_sudo_access() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    print_ok "Running as root."
+    return 0
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    print_error "sudo is not installed. Install it or run this script as root."
+    exit 1
+  fi
+  if ! sudo -v 2>/dev/null; then
+    print_error "sudo authentication failed. Ensure your user can run sudo."
+    print_hint "Add to sudoers: sudo usermod -aG sudo $USER  (then re-login)"
+    exit 1
+  fi
+  print_ok "sudo access confirmed."
+}
+
+# check_snap_docker: detect snap-installed Docker and warn about potential conflicts.
+# input: none
+# output: warning when snap Docker is detected
+check_snap_docker() {
+  if ! command -v snap >/dev/null 2>&1; then
+    return 0
+  fi
+  if snap list docker >/dev/null 2>&1; then
+    print_warn "Docker is installed via snap."
+    print_warn "snap Docker may conflict with Kata runtime registration in /etc/docker/daemon.json."
+    print_hint "Switch to apt Docker: sudo snap remove docker && sudo apt install -y docker.io"
+    print_hint "Continuing — if Kata runtime fails, remove snap Docker first."
+  fi
+}
+
 # is_pkg_installed: check whether apt package is installed.
 # input: package name
 # output: success code if installed
@@ -161,6 +256,10 @@ has_existing_docker_stack() {
   fi
 
   if is_pkg_installed docker-ce || is_pkg_installed docker.io || is_pkg_installed moby-engine; then
+    return 0
+  fi
+
+  if command -v snap >/dev/null 2>&1 && snap list docker >/dev/null 2>&1; then
     return 0
   fi
 
@@ -262,20 +361,42 @@ install_missing_packages() {
   local pkg
   for pkg in "${required[@]}"; do
     if is_pkg_installed "$pkg"; then
-      print_info "Package already installed: $pkg"
+      print_info "Already installed: $pkg"
     else
       missing+=("$pkg")
     fi
   done
 
   if (( ${#missing[@]} == 0 )); then
-    print_info "All prerequisite packages are already installed."
+    print_ok "All prerequisite packages are already installed."
     return 0
   fi
 
-  print_info "Installing missing packages: ${missing[*]}"
-  run_sudo apt update
-  run_sudo apt install -y "${missing[@]}"
+  print_info "Installing: ${missing[*]}"
+
+  if [[ -n "$APT_MIRROR" ]]; then
+    print_info "Applying host apt mirror: $APT_MIRROR"
+    local ubuntu_codename
+    ubuntu_codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+    local backup_file="/etc/apt/sources.list.sndbx-backup"
+    if [[ ! -f "$backup_file" ]]; then
+      run_sudo cp /etc/apt/sources.list "$backup_file"
+    fi
+    run_sudo tee /etc/apt/sources.list >/dev/null <<EOF
+deb $APT_MIRROR $ubuntu_codename main restricted universe multiverse
+deb $APT_MIRROR ${ubuntu_codename}-updates main restricted universe multiverse
+deb $APT_MIRROR ${ubuntu_codename}-backports main restricted universe multiverse
+deb $APT_MIRROR ${ubuntu_codename}-security main restricted universe multiverse
+EOF
+  fi
+
+  run_sudo apt-get update -q
+  run_sudo apt-get install -y "${missing[@]}"
+
+  if [[ -n "$APT_MIRROR" && -f "/etc/apt/sources.list.sndbx-backup" ]]; then
+    run_sudo mv /etc/apt/sources.list.sndbx-backup /etc/apt/sources.list
+    print_info "Restored /etc/apt/sources.list"
+  fi
 }
 
 # ensure_docker_service: enable/start Docker only when needed.
@@ -560,36 +681,83 @@ verify_kata_runtime_ready() {
 
   if ! test -f /etc/kata-containers/configuration.toml; then
     print_error "Missing /etc/kata-containers/configuration.toml"
-    print_error "Fix by copying one of ${KATA_PATH}/share/defaults/kata-containers/configuration-*.toml"
+    print_hint "Copy one of: ${KATA_PATH}/share/defaults/kata-containers/configuration-*.toml"
     exit 1
   fi
 
   runtimes_json="$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
   if [[ "$runtimes_json" != *'"kata"'* ]]; then
-    print_error "Docker runtime 'kata' is not visible in docker info"
-    print_error "Check /etc/docker/daemon.json runtimes.kata.runtimeType and restart docker"
+    print_error "Docker runtime 'kata' is not visible in 'docker info'"
+    print_hint "Check /etc/docker/daemon.json runtimes.kata.runtimeType and restart docker."
     exit 1
   fi
 
-  print_info "Kata runtime integration is ready (docker runtime + configuration.toml)."
+  print_ok "Kata runtime integration is ready."
+}
+
+# _hint_kvm_enable: print platform-specific KVM enablement hints to stderr.
+# input: none
+# output: hints to stderr
+_hint_kvm_enable() {
+  local virt=""
+  virt="$(systemd-detect-virt 2>/dev/null || true)"
+  case "$virt" in
+    vmware)
+      print_hint "VMware: enable 'Virtualize Intel VT-x/EPT or AMD-V/RVI'"
+      print_hint "  in VM Settings → Processors → Virtualization Engine."
+      ;;
+    microsoft)
+      print_hint "Hyper-V: enable nested virtualization on the host:"
+      print_hint "  Set-VMProcessor -VMName <name> -ExposeVirtualizationExtensions \$true"
+      ;;
+    oracle)
+      print_hint "VirtualBox: enable 'Enable Nested VT-x/AMD-V'"
+      print_hint "  in Settings → System → Processor."
+      ;;
+    kvm)
+      print_hint "Nested KVM: enable nested virt on the host:"
+      print_hint "  echo 'options kvm_intel nested=1' | sudo tee /etc/modprobe.d/kvm-nested.conf"
+      print_hint "  sudo modprobe -r kvm_intel && sudo modprobe kvm_intel"
+      ;;
+    lxc*|docker|podman)
+      print_hint "Running inside a container: KVM passthrough is not supported."
+      print_hint "Run sndbx on the host OS or in a VM with KVM passthrough enabled."
+      ;;
+    xen)
+      print_hint "Xen: contact your cloud provider to enable HVM/nested-virt."
+      ;;
+    none|"")
+      print_hint "Enable hardware virtualization (VT-x or AMD-V) in BIOS/UEFI firmware."
+      print_hint "For cloud VMs: check your provider docs for nested virtualization options."
+      ;;
+    *)
+      print_hint "Platform '$virt': check virtualization settings and enable VT-x/AMD-V."
+      ;;
+  esac
 }
 
 # verify_kvm_support: check KVM prerequisites and fail on unsupported setup.
 # input: none
 # output: exits on KVM verification failure
 verify_kvm_support() {
-  print_info "Verifying KVM support."
+  print_info "Loading KVM kernel modules."
 
   if ! lsmod | grep -q '^kvm\b'; then
-    run_sudo modprobe kvm
+    if ! run_sudo modprobe kvm 2>/dev/null; then
+      print_error "Cannot load kvm kernel module."
+      _hint_kvm_enable
+      exit 1
+    fi
   fi
 
-  if ! lsmod | grep -q '^kvm_(intel|amd)\b'; then
-    run_sudo modprobe kvm_intel || run_sudo modprobe kvm_amd
+  if ! lsmod | grep -qE '^kvm_(intel|amd)\b'; then
+    if ! run_sudo modprobe kvm_intel 2>/dev/null && ! run_sudo modprobe kvm_amd 2>/dev/null; then
+      print_warn "Neither kvm_intel nor kvm_amd loaded — may be OK on some platforms."
+    fi
   fi
 
   if ! command -v kvm-ok >/dev/null 2>&1; then
-    print_error "kvm-ok command is unavailable. Ensure cpu-checker is installed."
+    print_error "kvm-ok is unavailable. Ensure cpu-checker is installed."
     exit 1
   fi
 
@@ -597,17 +765,18 @@ verify_kvm_support() {
   if ! kvm_out="$(kvm-ok 2>&1)"; then
     print_error "kvm-ok failed:"
     echo "$kvm_out" >&2
+    _hint_kvm_enable
     exit 1
   fi
 
   if ! grep -qi "KVM acceleration can be used" <<< "$kvm_out"; then
-    print_error "KVM prerequisites check failed:"
+    print_error "KVM acceleration is not available:"
     echo "$kvm_out" >&2
-    print_error "If this is a nested VM setup, enable nested virtualization and retry."
+    _hint_kvm_enable
     exit 1
   fi
 
-  print_info "KVM check passed."
+  print_ok "KVM acceleration is available."
 }
 
 # detect_kata_arch: map system arch to Kata release arch.
@@ -642,42 +811,108 @@ is_kata_installed() {
 # output: installs Kata files and creates /usr/local/bin symlinks
 install_kata_if_missing() {
   if is_kata_installed; then
-    print_info "Kata is already installed at $KATA_PATH"
+    print_ok "Kata is already installed at $KATA_PATH"
     return 0
   fi
 
   if [[ -d "$KATA_PATH" ]]; then
     if [[ -n "$(ls -A "$KATA_PATH" 2>/dev/null)" ]]; then
       print_error "Target Kata path exists and is not empty: $KATA_PATH"
-      print_error "Refusing to overwrite existing data."
+      print_hint "Remove it manually: sudo rm -rf $KATA_PATH"
       exit 1
     fi
   fi
 
   local kata_arch
-  local kata_ver
   local tar_path
   local tmp_extract
+  local downloaded=0
 
   kata_arch="$(detect_kata_arch)"
-  kata_ver="$(curl -fsSL https://api.github.com/repos/kata-containers/kata-containers/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
-  if [[ ! -d "$TMP_PATH" ]]; then
-    mkdir -p "$TMP_PATH" 2>/dev/null || {
-      run_sudo mkdir -p "$TMP_PATH"
-      run_sudo chown "$(id -u):$(id -g)" "$TMP_PATH"
-    }
+
+  if [[ -n "$KATA_ARCHIVE" ]]; then
+    # Offline mode: use pre-downloaded archive.
+    if [[ ! -f "$KATA_ARCHIVE" ]]; then
+      print_error "Provided --kata_archive not found: $KATA_ARCHIVE"
+      exit 1
+    fi
+    tar_path="$KATA_ARCHIVE"
+    print_info "Using pre-downloaded archive: $tar_path"
+  else
+    local kata_ver
+    print_info "Fetching latest Kata release version from GitHub..."
+    kata_ver="$(curl -fsSL --retry 3 --retry-delay 2 \
+      https://api.github.com/repos/kata-containers/kata-containers/releases/latest \
+      | jq -r '.tag_name' | sed 's/^v//')"
+    if [[ -z "$kata_ver" ]]; then
+      print_error "Could not determine Kata version from GitHub API."
+      print_hint "Check internet connectivity or use: --kata_archive /path/to/kata-static-*.tar.zst"
+      exit 1
+    fi
+    print_info "Latest Kata release: ${kata_ver}"
+
+    if [[ ! -d "$TMP_PATH" ]]; then
+      mkdir -p "$TMP_PATH" 2>/dev/null || {
+        run_sudo mkdir -p "$TMP_PATH"
+        run_sudo chown "$(id -u):$(id -g)" "$TMP_PATH"
+      }
+    fi
+
+    local archive_name="kata-static-${kata_ver}-${kata_arch}.tar.zst"
+    local base_url="https://github.com/kata-containers/kata-containers/releases/download/${kata_ver}"
+    tar_path="${TMP_PATH}/${archive_name}"
+
+    print_info "Downloading Kata ${kata_ver} (${kata_arch}) — ~300 MB, may take a while..."
+    local attempt
+    for attempt in 1 2 3; do
+      # -C - resumes partial downloads.
+      if curl -fL --retry 3 --retry-delay 5 -C - --progress-bar \
+          -o "$tar_path" "${base_url}/${archive_name}"; then
+        downloaded=1
+        break
+      fi
+      if [[ "$attempt" -eq 3 ]]; then
+        print_error "Download failed after 3 attempts."
+        print_hint "Download manually and retry with: --kata_archive $tar_path"
+        exit 1
+      fi
+      print_warn "Attempt ${attempt} failed, retrying..."
+    done
+
+    # Verify SHA256 checksum.
+    print_info "Verifying SHA256 checksum..."
+    local checksum_file="${tar_path}.sha256sum"
+    if curl -fsSL --retry 3 --retry-delay 2 \
+        -o "$checksum_file" "${base_url}/${archive_name}.sha256sum" 2>/dev/null; then
+      local expected actual
+      expected="$(awk '{print $1}' "$checksum_file")"
+      actual="$(sha256sum "$tar_path" | awk '{print $1}')"
+      rm -f "$checksum_file"
+      if [[ "$expected" != "$actual" ]]; then
+        print_error "SHA256 mismatch — archive is corrupted."
+        print_hint "Expected: $expected"
+        print_hint "Got:      $actual"
+        rm -f "$tar_path"
+        exit 1
+      fi
+      print_ok "SHA256 checksum verified."
+    else
+      print_warn "Checksum file unavailable; skipping SHA256 verification."
+    fi
   fi
-  tar_path="${TMP_PATH}/kata-static-${kata_ver}-${kata_arch}.tar.zst"
+
   tmp_extract="$(mktemp -d -p "$TMP_PATH")"
 
-  print_info "Downloading Kata ${kata_ver} (${kata_arch})"
-  curl -fL -o "$tar_path" "https://github.com/kata-containers/kata-containers/releases/download/${kata_ver}/kata-static-${kata_ver}-${kata_arch}.tar.zst"
-
-  print_info "Extracting Kata archive"
-  tar --zstd -xvf "$tar_path" -C "$tmp_extract" >/dev/null
+  print_info "Extracting Kata archive..."
+  if ! tar --zstd -xf "$tar_path" -C "$tmp_extract"; then
+    print_error "Extraction failed — archive may be incomplete or corrupted."
+    rm -rf "$tmp_extract"
+    [[ "$downloaded" -eq 1 ]] && rm -f "$tar_path"
+    exit 1
+  fi
 
   if [[ ! -d "$tmp_extract/opt/kata" ]]; then
-    print_error "Unexpected Kata archive layout: missing opt/kata"
+    print_error "Unexpected archive layout: missing opt/kata"
     rm -rf "$tmp_extract"
     exit 1
   fi
@@ -689,9 +924,9 @@ install_kata_if_missing() {
   run_sudo ln -sfn "$KATA_PATH/bin/containerd-shim-kata-v2" /usr/local/bin/containerd-shim-kata-v2
 
   rm -rf "$tmp_extract"
-  rm -f "$tar_path"
+  [[ "$downloaded" -eq 1 ]] && rm -f "$tar_path"
 
-  print_info "Kata installed into $KATA_PATH"
+  print_ok "Kata installed into $KATA_PATH"
 }
 
 # main: install and verify prerequisites with idempotent behavior.
@@ -702,13 +937,24 @@ main() {
   require_absolute_path "--kata_path" "$KATA_PATH"
   require_absolute_path "--docker_path" "$DOCKER_PATH"
   require_absolute_path "--tmp_path" "$TMP_PATH"
+  if [[ -n "$KATA_ARCHIVE" && "$KATA_ARCHIVE" != /* ]]; then
+    print_error "--kata_archive must be an absolute path. Got: $KATA_ARCHIVE"
+    exit 1
+  fi
   show_startup_summary
   confirm_execution
 
+  print_step "Preflight checks"
+  check_sudo_access
   require_supported_os
   check_version_conflicts
   check_path_conflicts
+  check_snap_docker
 
+  print_step "KVM virtualization support"
+  verify_kvm_support
+
+  print_step "System packages"
   local -a required_packages=(
     python3
     python3-venv
@@ -724,21 +970,28 @@ main() {
   )
 
   if has_existing_docker_stack; then
-    print_info "Docker is already installed; package installation for Docker will be skipped."
+    print_info "Docker is already installed; skipping Docker package install."
   else
     required_packages+=(docker.io)
   fi
 
   install_missing_packages "${required_packages[@]}"
+
+  print_step "Docker service"
   ensure_docker_service
   ensure_docker_data_root
   ensure_user_in_docker_group
-  verify_kvm_support
+
+  print_step "Kata Containers"
   install_kata_if_missing
+
+  print_step "Kata runtime integration with Docker"
   ensure_docker_kata_runtime
   verify_kata_runtime_ready
 
-  print_info "Prerequisites are installed and verified."
+  echo ""
+  echo -e "${_C_GREEN}${_C_BOLD}━━━ All prerequisites installed and verified successfully. ━━━${_C_NC}"
+  echo ""
 }
 
 main "$@"

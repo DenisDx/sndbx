@@ -42,22 +42,33 @@ Custom install paths example:
 ./install_prerequisites.sh --kata_path /mnt/raid1/kata --docker_path /mnt/raid1/docker
 ```
 
-Custom install paths example:
+Use pre-downloaded Kata archive (offline/slow-network install):
 
 ```bash
-./install_prerequisites.sh --kata_path /mnt/raid1/kata --tmp_path /mnt/raid1/tmp
+./install_prerequisites.sh --kata_archive /path/to/kata-static-3.x.y-amd64.tar.zst
+```
+
+Use a fast apt mirror for host package installation (useful in China or corporate networks):
+
+```bash
+./install_prerequisites.sh --apt_mirror http://mirrors.aliyun.com/ubuntu
 ```
 
 The script behavior:
+- Verifies sudo access before doing anything
+- Detects snap-installed Docker and warns about potential conflicts
+- Checks KVM availability early with platform-specific hints (VMware, Hyper-V, VirtualBox, nested KVM, containers)
 - Installs only missing packages
-- Skips Docker package install if Docker is already present (for example `docker-ce`)
+- Skips Docker package install if Docker is already present (including snap, `docker-ce`, `docker.io`)
 - Enables/starts Docker only when needed
 - Adds current user to `docker` group only when missing
-- Verifies KVM support
 - Installs Kata only when missing (to `--kata_path` if specified)
+- Verifies SHA256 checksum of the downloaded Kata archive
+- Resumes interrupted downloads automatically (no need to restart from scratch)
 - Sets Docker data directory (`data-root`) to `--docker_path` if specified
 - Uses `--tmp_path` for temporary download/extraction (default: `/tmp`)
 - Stops with an error if installed versions are older than supported minimums
+- Prints a numbered step-by-step progress log
 - Prints startup summary and waits for `Y` confirmation (Enter cancels)
 
 Manual commands (if you prefer step-by-step setup):
@@ -451,6 +462,30 @@ The `config.json5` file defines sandboxes, users, and MCP settings:
   }
 }
 ```
+
+### Local Sandbox Images (images/<id>)
+
+You can define local sandbox images in project folders:
+
+```text
+images/<image_id>/
+  Dockerfile
+  app.py          # optional lifecycle hook script
+  ...other files
+```
+
+How it works:
+- If `sandboxes.items.<sandbox_id>.image` points to `<image_id>` and `images/<image_id>/Dockerfile` exists, sndbx can build the image locally.
+- Auto-build is triggered only when sandbox creation is needed and the Docker image is missing.
+- Existing containers keep normal start/stop behavior (no forced rebuild on startup).
+
+Lifecycle hook (`app.py`):
+- If `images/<image_id>/app.py` exists, sndbx executes it inside container as:
+  - `python3 /opt/sndbx-image/app.py`
+  - with env `SNDBX_HOOK=on_system_start`
+- Hook is called after successful create/start of a sandbox container.
+
+Web UI dashboard includes a "Local images" panel with Build/Rebuild/Update buttons.
 
 ## Troubleshooting
 

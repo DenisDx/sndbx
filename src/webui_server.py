@@ -8,6 +8,7 @@ Provides:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import json
@@ -18,7 +19,10 @@ import re
 import shlex
 import signal
 import secrets
+import struct
 import subprocess
+import termios
+import tty
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
@@ -301,6 +305,21 @@ class WebUIServer:
             if _constant_eq(str(user.get("login", "")), login) and _constant_eq(str(user.get("password", "")), password):
                 return user
         return None
+
+    def _image_action_message(self, image_ref: str, action: str, ok: bool, output: str) -> str:
+        """Build a concise dashboard message for image build/rebuild operations."""
+        action_name = "build" if action == "build" else "rebuild"
+        if ok:
+            return f"Image '{image_ref}' {action_name} completed"
+
+        raw = (output or "").strip()
+        if not raw:
+            return f"Image '{image_ref}' {action_name} failed"
+
+        compact = " ".join(raw.splitlines())
+        if len(compact) > 320:
+            compact = compact[:317] + "..."
+        return f"Image '{image_ref}' {action_name} failed: {compact}"
 
     async def _require_session(self, sndbx_session: Optional[str] = Cookie(default=None)) -> Dict[str, Any]:
         """Require valid session cookie."""
@@ -790,10 +809,32 @@ class WebUIServer:
             return {
                 "health": self._health_checks(),
                 "containers": self._containers_view(),
+                "images": self.sandbox_manager.list_local_images(),
                 "session": {
                     "login": session.get("login", ""),
                 },
             }
+
+        @app.get("/api/images")
+        async def images_endpoint(session: Dict[str, Any] = Depends(self._require_session)):
+            return {
+                "images": self.sandbox_manager.list_local_images(),
+            }
+
+        @app.post("/api/image/{image_ref}/action")
+        async def image_action(
+            image_ref: str,
+            body: ActionRequest,
+            session: Dict[str, Any] = Depends(self._require_session),
+        ):
+            action = body.action.strip().lower()
+            if action == "build":
+                ok, out = self.sandbox_manager.build_configured_image(image_ref, no_cache=False)
+                return {"ok": ok, "message": self._image_action_message(image_ref, action, ok, out)}
+            if action in ("rebuild", "update"):
+                ok, out = self.sandbox_manager.build_configured_image(image_ref, no_cache=True)
+                return {"ok": ok, "message": self._image_action_message(image_ref, action, ok, out)}
+            raise HTTPException(status_code=400, detail="Unknown image action")
 
         @app.post("/api/sandbox/{sandbox_id}/action")
         async def sandbox_action(
@@ -835,6 +876,12 @@ class WebUIServer:
                 if not setup_ok:
                     return {"ok": False, "error": "ssh_setup_failed", "message": setup_msg}
                 ok, port, err = self.ssh_pool.open(sandbox_id, container_ip)
+                if not ok and err == "socat_not_installed":
+                    return {
+                        "ok": False,
+                        "error": err,
+                        "message": "Host package 'socat' is not installed. Install it: sudo apt-get update && sudo apt-get install -y socat",
+                    }
                 return {"ok": ok, "ssh_port": port, "error": err,
                         "message": f"SSH ready. Connect: ssh root@<host> -p {port}" if ok else err}
 
@@ -882,12 +929,15 @@ class WebUIServer:
             logger.info("ws_console: sandbox '%s' ready, opening PTY", sandbox_id)
 
             master_fd, slave_fd = pty.openpty()
+            # Raw mode on the host PTY master: disable host-side echo and line
+            # processing so only the container PTY handles them (prevents double echo).
+            tty.setraw(master_fd)
             prompt = f"[sndbx:{sandbox_id}] \\u@\\h:\\w\\$ "
             proc = subprocess.Popen(
                 [
                     "docker",
                     "exec",
-                    "-i",
+                    "-it",   # allocate TTY inside container → cursor keys, mc, vim work
                     "-e",
                     "TERM=xterm-256color",
                     "-e",
@@ -930,6 +980,19 @@ class WebUIServer:
             async def _forward_input() -> None:
                 while True:
                     message = await websocket.receive_text()
+                    # Resize message from FitAddon: {"type":"resize","cols":N,"rows":N}
+                    try:
+                        msg = json.loads(message)
+                        if isinstance(msg, dict) and msg.get("type") == "resize":
+                            cols = max(1, int(msg.get("cols", 80)))
+                            rows = max(1, int(msg.get("rows", 24)))
+                            fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
+                                        struct.pack("HHHH", rows, cols, 0, 0))
+                            if proc.poll() is None:
+                                proc.send_signal(signal.SIGWINCH)
+                            continue
+                    except (json.JSONDecodeError, ValueError, OSError):
+                        pass
                     os.write(master_fd, message.encode("utf-8", errors="replace"))
 
             try:

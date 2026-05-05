@@ -34,7 +34,7 @@
   .login-box button:hover { opacity: 0.92; }
   #login-error { color: var(--err); margin-top: 10px; min-height: 18px; }
 
-  #app-screen { display: none; flex-direction: column; min-height: 100vh; }
+  #app-screen { display: none; flex-direction: column; height: 100vh; min-height: 100vh; }
   nav {
     display: flex; align-items: center; gap: 12px;
     padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
@@ -47,7 +47,7 @@
   }
   nav button:hover, nav button.active { border-color: var(--accent); color: var(--accent); }
 
-  .page { display: none; padding: 20px; }
+  .page { display: none; padding: 20px; min-height: 0; }
   .page.active { display: block; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .card-title { color: var(--muted); text-transform: uppercase; font-size: 12px; margin-bottom: 10px; letter-spacing: .06em; }
@@ -100,7 +100,9 @@
   }
   .toolbar button:hover { border-color: var(--accent); color: var(--accent); }
   #console-terminal {
-    height: 460px;
+    height: auto;
+    min-height: 220px;
+    flex: 1;
     background: #0a0c12;
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -109,6 +111,9 @@
   #console-status { min-height: 20px; }
   #system-log-output {
     height: 260px;
+    min-height: 140px;
+    max-height: 70vh;
+    resize: vertical;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -139,6 +144,21 @@
     color: var(--text);
   }
   .log-controls button:hover { border-color: var(--accent); color: var(--accent); }
+
+  #page-console.active {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+
+  #page-console .card {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    margin-bottom: 0;
+  }
 </style>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 </head>
@@ -206,6 +226,24 @@
       </div>
 
       <div class="card">
+        <div class="card-title">Local images</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Image</th>
+              <th>Local folder</th>
+              <th>Built</th>
+              <th>Dockerfile</th>
+              <th>Hook app.py</th>
+              <th>Used by</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="images-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
         <div class="log-controls">
           <div class="card-title" style="margin-bottom: 0;">System log</div>
           <label class="muted"><input id="log-auto-update" type="checkbox" checked> Enable update</label>
@@ -249,6 +287,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
