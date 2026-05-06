@@ -144,7 +144,9 @@ class DockerSandboxManager:
                 continue
             host_path = str(row.get('host_path', '')).strip()
             guest_path = str(row.get('guest_path', '')).strip()
+            mount_type = str(row.get('mount_type', '')).strip().lower()
             permission = str(row.get('permission', 'rw')).strip().lower()
+            host_mode = str(row.get('host_mode', '')).strip()
             mode = 'ro' if permission == 'ro' else 'rw'
 
             if not host_path or not guest_path:
@@ -156,19 +158,81 @@ class DockerSandboxManager:
 
             # If mount target looks like a file, ensure parent + file; otherwise ensure dir.
             guest_name = Path(guest_path).name
-            host_name = host.name
-            is_file_mount = ('.' in guest_name) or ('.' in host_name)
+            # Prefer explicit mount_type from config. Fallback to conservative suffix-based heuristic.
+            if mount_type == 'file':
+                is_file_mount = True
+            elif mount_type == 'dir':
+                is_file_mount = False
+            else:
+                is_file_mount = bool(Path(guest_name).suffix and not guest_name.startswith('.'))
             try:
                 if is_file_mount:
                     host.parent.mkdir(parents=True, exist_ok=True)
                     host.touch(exist_ok=True)
                 else:
+                    if host.exists() and host.is_file():
+                        logger.warning(
+                            "Mount path '%s' is a file but directory is required; replacing with directory",
+                            host,
+                        )
+                        host.unlink()
                     host.mkdir(parents=True, exist_ok=True)
+                    # Apply host_mode permissions if specified
+                    if host_mode:
+                        try:
+                            import os
+                            os.chmod(host, int(host_mode, 8))
+                        except (ValueError, OSError) as exc:
+                            logger.warning("Could not set mode %s on %s: %s", host_mode, host, exc)
             except Exception as exc:
                 logger.warning("Could not prepare host mount '%s' for sandbox '%s': %s", host, sandbox_id, exc)
                 continue
 
             args.extend(['-v', f'{host}:{guest_path}:{mode}'])
+
+        return args
+
+    def _port_binding_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
+        """Build docker -p args from sandbox port_bindings config.
+
+        input: sandbox id and sandbox config
+        output: flat docker run argument list
+        """
+        args: List[str] = []
+        rows = sandbox_cfg.get('port_bindings', [])
+        if not isinstance(rows, list):
+            return args
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            bind_host = str(row.get('bind_host', '127.0.0.1')).strip() or '127.0.0.1'
+            vm_port = row.get('vm_port')
+            publish_port = row.get('publish_port')
+
+            try:
+                vm_port_i = int(vm_port)
+                publish_port_i = int(publish_port)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid port binding in sandbox '%s': vm_port=%r publish_port=%r",
+                    sandbox_id,
+                    vm_port,
+                    publish_port,
+                )
+                continue
+
+            if not (1 <= vm_port_i <= 65535 and 1 <= publish_port_i <= 65535):
+                logger.warning(
+                    "Out-of-range port binding in sandbox '%s': vm_port=%s publish_port=%s",
+                    sandbox_id,
+                    vm_port_i,
+                    publish_port_i,
+                )
+                continue
+
+            args.extend(['-p', f'{bind_host}:{publish_port_i}:{vm_port_i}'])
 
         return args
 
@@ -401,6 +465,7 @@ pkill -x sshd || true
             '--tmpfs', '/var/cache/apt:rw,exec',
         ]
         shared_mount_args = self._shared_mount_args(sandbox_id, sandbox_cfg)
+        port_binding_args = self._port_binding_args(sandbox_id, sandbox_cfg)
 
         base_cmd = [
             'run',
@@ -411,6 +476,7 @@ pkill -x sshd || true
             '--detach',
             *apt_tmpfs_args,
             *shared_mount_args,
+            *port_binding_args,
             image,
             'sleep', 'infinity'  # Keep container running
         ]
@@ -427,6 +493,7 @@ pkill -x sshd || true
                 '--storage-opt', f'size={disk_max}',
                 *apt_tmpfs_args,
                 *shared_mount_args,
+                *port_binding_args,
                 image,
                 'sleep', 'infinity'  # Keep container running
             ]

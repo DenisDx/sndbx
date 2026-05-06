@@ -126,6 +126,166 @@ def _configure_sshd() -> None:
     subprocess.run(["/usr/sbin/sshd"], check=True)
 
 
+def _parse_ssh_keys_from_json(json_path: Path) -> list[str]:
+    """Parse SSH public keys from JSON sync file on shared mount.
+
+    input: path to JSON file with keys
+    output: list of unique, non-empty key strings; empty list if file missing or invalid
+    """
+    if not json_path.exists():
+        return []
+    
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        keys = data.get("keys", [])
+        if not isinstance(keys, list):
+            return []
+        return [k.strip() for k in keys if isinstance(k, str) and k.strip()]
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _sync_ssh_keys_from_share() -> bool:
+    """Sync SSH authorized_keys from shared JSON file (called by systemd timer).
+
+    Reads keys from /root/shared/.ssh-sync.json, merges with existing, writes to authorized_keys.
+    input: none
+    output: True if sync succeeded, False otherwise
+    """
+    json_path = Path("/root/shared/.ssh-sync.json")
+    keys_path = Path("/root/.ssh/authorized_keys")
+    
+    # Read keys from JSON on shared mount
+    new_keys = _parse_ssh_keys_from_json(json_path)
+    
+    if not new_keys:
+        # No update available, keep existing
+        return True
+    
+    # Parse existing keys to avoid duplicates when appending
+    existing_keys = []
+    if keys_path.exists():
+        existing = keys_path.read_text(encoding="utf-8")
+        existing_keys = [k.strip() for k in existing.split("\n") if k.strip()]
+    
+    # Merge: new keys take priority (replace mode), or append
+    # For now: replace mode (overwrite with new_keys)
+    _write_authorized_keys(keys_path, new_keys)
+    print(f"_sync_ssh_keys_from_share: synced {len(new_keys)} key(s) from {json_path}")
+    return True
+
+
+def _install_ssh_sync_service() -> bool:
+    """Install systemd service and timer for periodic SSH key sync from shared mount.
+
+    input: none
+    output: True if installation succeeded
+    """
+    sync_script_path = Path("/root/.ssh/sync-from-share.sh")
+    service_path = Path("/etc/systemd/system/sndbx-ssh-sync.service")
+    timer_path = Path("/etc/systemd/system/sndbx-ssh-sync.timer")
+    
+    # Create sync script
+    sync_script = """#!/bin/bash
+set -e
+# Sync SSH keys from shared JSON file
+/root/.ssh/sync-from-share.py
+"""
+    sync_script_path.write_text(sync_script, encoding="utf-8")
+    os.chmod(sync_script_path, 0o755)
+    
+    # Create sync Python helper (simpler than wrapping the function)
+    sync_helper = '''#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+def _parse_ssh_keys_from_json(json_path: Path) -> list[str]:
+    """Parse SSH public keys from JSON sync file on shared mount."""
+    if not json_path.exists():
+        return []
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        keys = data.get("keys", [])
+        if not isinstance(keys, list):
+            return []
+        return [k.strip() for k in keys if isinstance(k, str) and k.strip()]
+    except (json.JSONDecodeError, OSError):
+        return []
+
+def _write_authorized_keys(path: Path, keys: list[str]) -> None:
+    """Write unique, normalized keys to authorized_keys; set correct permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            unique.append(k)
+    content = "\\n".join(unique) + ("\\n" if unique else "")
+    path.write_text(content, encoding="utf-8")
+    import os
+    os.chmod(path.parent, 0o700)
+    os.chmod(path, 0o600)
+    import subprocess
+    subprocess.run(["chown", "root:root", str(path.parent)], check=True)
+    subprocess.run(["chown", "root:root", str(path)], check=True)
+
+json_path = Path("/root/shared/.ssh-sync.json")
+keys_path = Path("/root/.ssh/authorized_keys")
+new_keys = _parse_ssh_keys_from_json(json_path)
+
+if new_keys:
+    _write_authorized_keys(keys_path, new_keys)
+    print(f"SSH keys synced: {len(new_keys)} key(s)")
+    sys.exit(0)
+else:
+    sys.exit(0)
+'''
+    sync_helper_path = Path("/root/.ssh/sync-from-share.py")
+    sync_helper_path.write_text(sync_helper, encoding="utf-8")
+    os.chmod(sync_helper_path, 0o755)
+    
+    # Create systemd service
+    service_content = """[Unit]
+Description=Sync SSH authorized_keys from shared JSON
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/.ssh/sync-from-share.py
+User=root
+StandardOutput=journal
+StandardError=journal
+"""
+    service_path.write_text(service_content, encoding="utf-8")
+    
+    # Create systemd timer (runs every 30 seconds after boot)
+    timer_content = """[Unit]
+Description=Periodic SSH key sync timer
+Requires=sndbx-ssh-sync.service
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+    timer_path.write_text(timer_content, encoding="utf-8")
+    
+    try:
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "enable", "sndbx-ssh-sync.timer"], check=True)
+        subprocess.run(["systemctl", "start", "sndbx-ssh-sync.timer"], check=True)
+        print("SSH sync systemd timer installed and started")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to install SSH sync timer: {e}", file=sys.stderr)
+        return False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Hooks
 # ──────────────────────────────────────────────────────────────────────────────
@@ -135,6 +295,8 @@ def on_system_start(ctx: SandboxContext) -> int:
 
     Keys come from ctx.ssh_keys() (sandbox config). If the config has no keys,
     the existing /root/.ssh/authorized_keys content is preserved unchanged.
+    
+    Installs systemd timer for periodic SSH key sync from shared JSON file.
 
     input: SandboxContext with sandbox config provided by sndbx core
     output: process exit code (0 = success)
@@ -150,6 +312,7 @@ def on_system_start(ctx: SandboxContext) -> int:
         print(f"on_system_start: wrote {len(keys)} key(s) for '{ctx.sandbox_id}'")
 
     _configure_sshd()
+    _install_ssh_sync_service()
     return 0
 
 

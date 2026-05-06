@@ -182,6 +182,7 @@ class SNDBXApp:
         self.mcp_server.register_tool('sandbox_status', handlers.tool_sandbox_status)
         self.mcp_server.register_tool('sandbox_start', handlers.tool_sandbox_start)
         self.mcp_server.register_tool('sandbox_stop', handlers.tool_sandbox_stop)
+        self.mcp_server.register_tool('mcp_proxy_call', handlers.tool_mcp_proxy_call)
         
         self.logger.info("Starting MCP server...")
         await self.mcp_server.start()

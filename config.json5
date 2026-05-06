@@ -57,7 +57,14 @@
           {
             host_path: "${SNDBX_ROOT}/shared/default_sandbox_1/.ssh",
             guest_path: "/root/.ssh",
+            mount_type: "dir",
             permission: "rw"
+          },
+          {
+            host_path: "${SNDBX_ROOT}/shared/default_sandbox_1/shared",
+            guest_path: "/root/shared",
+            permission: "rw",
+            host_mode: "0777"
           }
         ]
       },
@@ -82,7 +89,89 @@
           {
             host_path: "${SNDBX_ROOT}/shared/default_sandbox_1/.ssh",
             guest_path: "/root/.ssh",
+            mount_type: "dir",
             permission: "rw"
+          },
+          {
+            host_path: "${SNDBX_ROOT}/shared/default_sandbox_1/shared",
+            guest_path: "/root/shared",
+            permission: "rw",
+            host_mode: "0777"
+          }
+        ]
+      },
+      "mcp-toolbox-1": {
+        title: "MCP toolbox sandbox",
+        image: "mcp_toolbox_1",
+        memory: "${VM_MEMORY:-2G}",
+        cpus: ${VM_CPUS:-2},
+        disk_max: "${VM_DISK_MAX:-20G}",
+        network_traffic_max: "${VM_NETWORK_TRAFFIC_MAX:-100G}",
+        persistent: true,
+        run_at_startup: false,
+        ssh_keys: [
+          "${MY_SSH_PUBLIC_KEY}"
+        ],
+        shared_directories: [
+          {
+            host_path: "${SNDBX_ROOT}/shared/mcp_toolbox_1/.ssh",
+            guest_path: "/root/.ssh",
+            mount_type: "dir",
+            permission: "rw"
+          },
+          {
+            host_path: "${SNDBX_ROOT}/shared/mcp_toolbox_1/shared",
+            guest_path: "/root/shared",
+            permission: "rw",
+            host_mode: "0777"
+          }
+        ],
+        // Generic host->VM published services (not limited to MCP)
+        port_bindings: [
+          {
+            bind_host: "${MCP_TOOLBOX_BIND_HOST:-127.0.0.1}",
+            vm_port: 9011,
+            publish_port: ${MCP_TOOLBOX_FS_PORT:-39011}
+          },
+          {
+            bind_host: "${MCP_TOOLBOX_BIND_HOST:-127.0.0.1}",
+            vm_port: 9012,
+            publish_port: ${MCP_TOOLBOX_BASH_PORT:-39012}
+          },
+          {
+            bind_host: "${MCP_TOOLBOX_BIND_HOST:-127.0.0.1}",
+            vm_port: 9013,
+            publish_port: ${MCP_TOOLBOX_GIT_PORT:-39013}
+          }
+        ],
+        // MCP bindings for sndbx-side proxy routing by envid
+        mcp_bindings: [
+          {
+            backend_id: "filesystem",
+            transport: "tcp-jsonl",
+            vm_port: 9011,
+            tools: ["*"],
+            auth_mode: "token_passthrough",
+            startup_timeout_sec: 10,
+            read_timeout_sec: 30
+          },
+          {
+            backend_id: "bash",
+            transport: "tcp-jsonl",
+            vm_port: 9012,
+            tools: ["*"],
+            auth_mode: "token_passthrough",
+            startup_timeout_sec: 10,
+            read_timeout_sec: 30
+          },
+          {
+            backend_id: "git",
+            transport: "tcp-jsonl",
+            vm_port: 9013,
+            tools: ["*"],
+            auth_mode: "token_passthrough",
+            startup_timeout_sec: 10,
+            read_timeout_sec: 30
           }
         ]
       }
@@ -93,6 +182,10 @@
     "default-env-token": {
       sandbox: "sandbox-1",
       description: "Default environment for testing"
+    },
+    "mcp-toolbox-env-token": {
+      sandbox: "mcp-toolbox-1",
+      description: "MCP toolbox environment"
     }
   },
 
@@ -102,7 +195,7 @@
         login: "testuser",
         password: "testpass",
         token: "test-token-123456789",
-        envids: ["default-env-token"]
+        envids: ["default-env-token", "mcp-toolbox-env-token"]
       }
     ]
   },

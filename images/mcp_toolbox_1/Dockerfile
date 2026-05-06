@@ -12,17 +12,28 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
+        python3-pip \
         openssh-server \
         ca-certificates \
-        ncurses-term \
-        locales \
+        curl \
+        gnupg \
+        git \
+        iproute2 \
+        socat \
     && rm -rf /var/lib/apt/lists/*
 
-RUN sed -i 's/^# en_US.UTF-8 UTF-8$/en_US.UTF-8 UTF-8/' /etc/locale.gen \
-    && locale-gen \
-    && update-locale LANG=en_US.UTF-8
+# Node 20+ is required for official MCP servers (ESM/top-level await support).
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /run/sshd /root/.ssh /opt/sndbx-image \
+# Install MCP server packages (official + community shell variants)
+RUN npm install -g @modelcontextprotocol/server-filesystem mcp-shell-server
+
+RUN pip3 install --no-cache-dir mcp-server-git
+
+RUN mkdir -p /run/sshd /root/.ssh /root/shared /opt/sndbx-image \
     && chmod 700 /root/.ssh \
     && touch /root/.ssh/authorized_keys \
     && chmod 600 /root/.ssh/authorized_keys
