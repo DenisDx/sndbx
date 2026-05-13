@@ -671,6 +671,62 @@ ensure_docker_kata_runtime() {
       print_warn "Docker restart timed out or failed. Check: sudo systemctl status docker --no-pager -l"
     fi
   fi
+
+  local runtimes_json
+  runtimes_json="$(docker_info_runtimes_json)"
+  if [[ "$runtimes_json" != *'"kata"'* ]]; then
+    print_warn "Docker runtime 'kata' is not visible with runtimeType config. Trying legacy shim-path fallback."
+
+    tmpfile="$(mktemp)"
+    jq '
+      . as $cfg
+      | ($cfg.runtimes // {}) as $r
+      | ($r.kata // {}) as $k
+      | $cfg + {runtimes: ($r + {kata: (($k + {path: "/usr/local/bin/containerd-shim-kata-v2", runtimeArgs: []}) | del(.runtimeType))})}
+    ' "$daemon_file" > "$tmpfile"
+
+    if ! cmp -s "$tmpfile" "$daemon_file"; then
+      run_sudo mv "$tmpfile" "$daemon_file"
+      changed=1
+      print_info "Applied legacy Docker runtime config for 'kata' -> /usr/local/bin/containerd-shim-kata-v2"
+    else
+      rm -f "$tmpfile"
+    fi
+
+    if [[ "$changed" -eq 1 ]]; then
+      if run_sudo timeout 30 systemctl restart docker; then
+        print_info "Docker restarted successfully after legacy runtime update."
+      else
+        print_warn "Docker restart timed out or failed. Check: sudo systemctl status docker --no-pager -l"
+      fi
+    fi
+  fi
+}
+
+# docker_info_runtimes_json: query docker runtimes with permission-aware fallback.
+# input: none
+# output: JSON object string on stdout, empty string on failure
+docker_info_runtimes_json() {
+  local out
+  local errfile
+  errfile="$(mktemp)"
+
+  if out="$(docker info --format '{{json .Runtimes}}' 2>"$errfile")"; then
+    rm -f "$errfile"
+    echo "$out"
+    return 0
+  fi
+
+  if grep -qiE 'permission denied|got permission denied' "$errfile"; then
+    if out="$(run_sudo docker info --format '{{json .Runtimes}}' 2>/dev/null)"; then
+      rm -f "$errfile"
+      echo "$out"
+      return 0
+    fi
+  fi
+
+  rm -f "$errfile"
+  echo ""
 }
 
 # verify_kata_runtime_ready: ensure Docker+Kata integration is actually usable.
@@ -685,10 +741,17 @@ verify_kata_runtime_ready() {
     exit 1
   fi
 
-  runtimes_json="$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
+  runtimes_json="$(docker_info_runtimes_json)"
+  if [[ -z "$runtimes_json" ]]; then
+    print_error "Cannot query Docker runtimes."
+    print_hint "Ensure Docker is running and your user has access (or run with sudo)."
+    exit 1
+  fi
+
   if [[ "$runtimes_json" != *'"kata"'* ]]; then
     print_error "Docker runtime 'kata' is not visible in 'docker info'"
-    print_hint "Check /etc/docker/daemon.json runtimes.kata.runtimeType and restart docker."
+    print_hint "Check /etc/docker/daemon.json runtimes.kata and restart docker."
+    print_hint "If Docker was installed via snap, remove snap docker and use apt docker.io."
     exit 1
   fi
 
@@ -951,6 +1014,9 @@ main() {
   check_path_conflicts
   check_snap_docker
 
+  print_step "Bootstrap package for KVM check"
+  install_missing_packages cpu-checker
+
   print_step "KVM virtualization support"
   verify_kvm_support
 
@@ -966,7 +1032,6 @@ main() {
     socat
     qemu-system-x86
     qemu-utils
-    cpu-checker
   )
 
   if has_existing_docker_stack; then
