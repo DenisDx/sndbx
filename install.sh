@@ -22,6 +22,45 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+DOCKER_SUDO_FALLBACK_USED=false
+
+# docker_cmd: run docker command with sudo fallback on docker.sock permission errors.
+# input: docker subcommand and args; output: command stdout/stderr and exit code.
+docker_cmd() {
+    local errfile
+    local rc
+    errfile="$(mktemp)"
+
+    if docker "$@" 2>"$errfile"; then
+        rm -f "$errfile"
+        return 0
+    fi
+
+    rc=$?
+
+    if grep -qiE "permission denied|got permission denied|cannot connect to the docker daemon" "$errfile"; then
+        rm -f "$errfile"
+
+        if command -v sudo >/dev/null 2>&1; then
+            if [[ "$DOCKER_SUDO_FALLBACK_USED" != true ]]; then
+                log_warn "Docker access for current shell is limited; retrying Docker commands via sudo"
+                log_warn "If install_prerequisites.sh just added your user to docker group, re-login or run: newgrp docker"
+                DOCKER_SUDO_FALLBACK_USED=true
+            fi
+            sudo docker "$@"
+            return $?
+        fi
+
+        log_error "Docker daemon access denied and sudo is unavailable"
+        log_error "Re-login after docker group update or run this script with sudo"
+        return "$rc"
+    fi
+
+    cat "$errfile" >&2
+    rm -f "$errfile"
+    return "$rc"
+}
+
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -57,7 +96,7 @@ fi
 log_info "Found Kata runtime"
 
 # Verify Kata runtime is registered with Docker
-if ! docker run --rm --name kata-check --runtime kata alpine echo "OK" 2>/dev/null; then
+if ! docker_cmd run --rm --name kata-check --runtime kata alpine echo "OK" >/dev/null; then
     log_warn "Kata runtime check failed - may need to verify Docker daemon.json configuration"
 fi
 
@@ -113,9 +152,9 @@ log_info "MCP_PORT=$MCP_PORT"
 log_info "MCP_HOST=$MCP_HOST"
 
 # Create Docker network for sandboxes (if needed)
-if ! docker network inspect sndbx-net &>/dev/null; then
+if ! docker_cmd network inspect sndbx-net &>/dev/null; then
     log_info "Creating Docker network: sndbx-net"
-    docker network create sndbx-net --driver bridge
+    docker_cmd network create sndbx-net --driver bridge
 else
     log_info "Docker network sndbx-net already exists"
 fi
@@ -243,12 +282,28 @@ if $USE_SYSTEM_SERVICE; then
     sudo systemctl enable sndbx.service
     SYSTEMCTL_CMD="sudo systemctl"
     log_info "Service enabled (system-wide)"
+
+    log_info "Starting system-wide sndbx service..."
+    if sudo systemctl start sndbx.service; then
+        log_info "Service started (system-wide)"
+    else
+        log_warn "Failed to start sndbx service automatically"
+        log_warn "Check status: sudo systemctl status sndbx"
+    fi
 else
     log_info "Enabling user sndbx service..."
     systemctl --user daemon-reload
     systemctl --user enable sndbx.service
     SYSTEMCTL_CMD="systemctl --user"
     log_info "Service enabled (user-level)"
+
+    log_info "Starting user sndbx service..."
+    if systemctl --user start sndbx.service; then
+        log_info "Service started (user-level)"
+    else
+        log_warn "Failed to start sndbx service automatically"
+        log_warn "Check status: systemctl --user status sndbx"
+    fi
 fi
 
 log_info "Installation complete!"
@@ -258,13 +313,11 @@ log_info "1. Review configuration:"
 log_info "   nano .env              # Configure MCP_PORT, MCP_HOST, etc."
 log_info "   nano config.json5      # Define sandboxes and users"
 log_info ""
-log_info "2. Start the service:"
+log_info "2. Check service status:"
 if $USE_SYSTEM_SERVICE; then
-    log_info "   sudo systemctl start sndbx"
     log_info "   sudo systemctl status sndbx"
     log_info "   sudo journalctl -u sndbx -f        # View logs"
 else
-    log_info "   systemctl --user start sndbx"
     log_info "   systemctl --user status sndbx"
     log_info "   journalctl --user -u sndbx -f      # View logs"
 fi
@@ -274,6 +327,9 @@ log_info "   ./test_mcp.sh"
 log_info ""
 log_info "4. Open Web UI:"
 log_info "   http://${WEBUI_HOST}:${WEBUI_PORT}"
+log_info "   Default login: admin"
+log_info "   Default password: admin"
+log_info "   YOU MUST CHANGE THE DEFAULT PASSWORD IMMEDIATELY"
 log_info ""
 log_info "5. For more information:"
 log_info "   cat README.md          # Full documentation"
