@@ -6,11 +6,12 @@ Orchestrates all services: MCP server, Web UI, VM management
 
 import sys
 import os
-import logging
 import asyncio
 import signal
+import threading
 
 from config import load_config
+from logging_utils import configure_logging, get_logger
 from sandbox import DockerSandboxManager
 from mcp_server import MCPServer
 from tools import ToolHandlers
@@ -27,36 +28,49 @@ class SNDBXApp:
         self.sandbox_manager = None
         self.mcp_server = None
         self.webui_server = None
-        self.logger = None
-        self._setup_logging()
+        self.logger = get_logger('core')
+        self._install_exception_hooks()
+
+    def _install_exception_hooks(self):
+        """Install global exception hooks to route unhandled errors to core log."""
+
+        def _sys_excepthook(exc_type, exc_value, exc_traceback):
+            if issubclass(exc_type, KeyboardInterrupt):
+                return
+            self.logger.error("Unhandled Python exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+        def _thread_excepthook(args):
+            if args.exc_type and issubclass(args.exc_type, KeyboardInterrupt):
+                return
+            thread_name = args.thread.name if args.thread is not None else "unknown"
+            self.logger.error(
+                "Unhandled thread exception in %s",
+                thread_name,
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+
+        sys.excepthook = _sys_excepthook
+        if hasattr(threading, "excepthook"):
+            threading.excepthook = _thread_excepthook
     
     def _setup_logging(self):
         """Setup logging from config"""
-        log_level = os.getenv('LOG_LEVEL', 'info').upper()
-        self.logger = logging.getLogger('sndbx')
-        self.logger.setLevel(getattr(logging, log_level, logging.INFO))
-        
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(getattr(logging, log_level, logging.INFO))
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        console_handler.setFormatter(formatter)
-        self.logger.addHandler(console_handler)
+        if self.config and self.root_dir:
+            configure_logging(self.config, self.root_dir)
+        self.logger = get_logger('core')
+        self._install_exception_hooks()
     
     async def start(self):
         """Start all sndbx services"""
-        self.logger.info("=" * 80)
-        self.logger.info("Starting sndbx application")
-        self.logger.info("=" * 80)
-        
+        self.logger.info("Service startup initiated")
+
         try:
             # Load configuration
             self.root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             config_data = load_config(self.root_dir)
             self.config = config_data['config']
             self.env_vars = config_data['env']
+            self._setup_logging()
             
             self.logger.info(f"Config: {self.config.get('title')}")
             self.logger.info(f"Instance: {self.config.get('instance')}")
@@ -72,6 +86,8 @@ class SNDBXApp:
             # Start sandboxes that are marked to run at startup.
             self._start_startup_sandboxes()
 
+            self._init_mcp_server()
+
             self.webui_server = WebUIServer(
                 root_dir=self.root_dir,
                 config=self.config,
@@ -79,14 +95,15 @@ class SNDBXApp:
             )
             self.logger.info("Web UI server initialized")
 
+            mcp_task = asyncio.create_task(self._start_mcp_server())
+            webui_task = asyncio.create_task(self._start_webui_server())
             await asyncio.gather(
-                self._start_mcp_server(),
-                self._start_webui_server(),
+                self.mcp_server.started_event.wait(),
+                self.webui_server.started_event.wait(),
             )
-            
-            self.logger.info("=" * 80)
-            self.logger.info("sndbx is running. Press Ctrl+C to stop.")
-            self.logger.info("=" * 80)
+            self.logger.info("Service startup completed")
+
+            await asyncio.gather(mcp_task, webui_task)
         
         except Exception as e:
             self.logger.exception(f"Failed to start application: {e}")
@@ -162,20 +179,18 @@ class SNDBXApp:
         self.logger.info(f"Starting Web UI server on {host}:{port}")
         await self.webui_server.start()
     
-    async def _start_mcp_server(self):
-        """Initialize and start MCP server"""
+    def _init_mcp_server(self):
+        """Initialize MCP server and register handlers."""
         mcp_config = self.config.get('mcp', {})
         host = mcp_config.get('bind', '0.0.0.0')
         port = mcp_config.get('port', 30081)
-        
+
         self.logger.info(f"Initializing MCP server on {host}:{port}")
-        
+
         self.mcp_server = MCPServer(host, port, self.config)
         self.mcp_server.sandbox_manager = self.sandbox_manager
-        
-        # Register tool handlers
+
         handlers = ToolHandlers(self.sandbox_manager, self.config)
-        
         self.mcp_server.register_tool('execute_command', handlers.tool_execute_command)
         self.mcp_server.register_tool('read_file', handlers.tool_read_file)
         self.mcp_server.register_tool('write_file', handlers.tool_write_file)
@@ -183,16 +198,14 @@ class SNDBXApp:
         self.mcp_server.register_tool('sandbox_start', handlers.tool_sandbox_start)
         self.mcp_server.register_tool('sandbox_stop', handlers.tool_sandbox_stop)
         self.mcp_server.register_tool('mcp_proxy_call', handlers.tool_mcp_proxy_call)
-        
+
+    async def _start_mcp_server(self):
+        """Start initialized MCP server."""
         self.logger.info("Starting MCP server...")
         await self.mcp_server.start()
     
     async def stop(self):
         """Stop all services gracefully"""
-        self.logger.info("=" * 80)
-        self.logger.info("Stopping sndbx application")
-        self.logger.info("=" * 80)
-        
         if self.mcp_server:
             self.logger.info("Closing MCP server...")
             # TODO: implement graceful shutdown for MCP server
@@ -205,7 +218,7 @@ class SNDBXApp:
             self.logger.info("Stopping sandboxes...")
             self._stop_all_sandboxes()
         
-        self.logger.info("sndbx stopped")
+        self.logger.info("Service shutdown completed")
 
 
 async def main():
@@ -214,11 +227,26 @@ async def main():
     
     # Handle signals
     def signal_handler(sig, frame):
-        app.logger.info(f"Received signal {sig}")
+        sig_name = signal.Signals(sig).name if sig in signal.Signals._value2member_map_ else str(sig)
+        reason = os.environ.pop("SNDBX_STOP_REASON", f"received {sig_name}")
+        app.logger.info("Service shutdown initiated: %s", reason)
         raise KeyboardInterrupt()
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+    loop = asyncio.get_running_loop()
+
+    def loop_exception_handler(loop_obj, context):
+        """Log unhandled asyncio exceptions through core logger."""
+        exc = context.get("exception")
+        msg = context.get("message", "Unhandled asyncio exception")
+        if exc is not None:
+            app.logger.error("%s", msg, exc_info=(type(exc), exc, exc.__traceback__))
+            return
+        app.logger.error("%s", msg)
+
+    loop.set_exception_handler(loop_exception_handler)
     
     try:
         await app.start()

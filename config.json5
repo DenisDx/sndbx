@@ -7,6 +7,15 @@
   
   logging: {
     level: "${LOG_LEVEL:-info}",
+    // Use "local" for server local timezone, "UTC", or IANA name (e.g. "Europe/Moscow").
+    "timezone": "${LOG_TIMEZONE:-local}",
+    levels: {
+      "core": "info",
+      "webui": "info",
+      "mcp": "info",
+      "sandbox_manager": "info",
+      "ssh": "info"
+    },
     wipe_period: ${LOG_WIPE_PERIOD:-0},
   },
 

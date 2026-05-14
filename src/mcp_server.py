@@ -5,12 +5,12 @@ Handles tool calls for sandbox management
 
 import asyncio
 import json
-import logging
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, asdict
 
+from logging_utils import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("mcp")
 
 
 @dataclass
@@ -41,11 +41,12 @@ class MCPServer:
         self.tools: Dict[str, Callable] = {}
         self.tokens = config.get('mcp', {}).get('auth', {}).get('tokens', [])
         self.sandbox_manager = None
+        self.started_event = asyncio.Event()
     
     def register_tool(self, name: str, handler: Callable) -> None:
         """Register a tool handler"""
         self.tools[name] = handler
-        logger.info(f"Registered tool: {name}")
+        logger.info("Registered tool: %s", name)
     
     def validate_token(self, token: Optional[str]) -> bool:
         """Validate authentication token"""
@@ -92,6 +93,7 @@ class MCPServer:
             
             # Resolve envid/sandbox
             resolved_envid = self.resolve_envid(token, envid)
+            logger.info("Request received: id=%s method=%s envid=%s", request_id, method, resolved_envid or envid)
             if not resolved_envid:
                 return json.dumps(asdict(MCPResponse(
                     id=request_id,
@@ -107,6 +109,7 @@ class MCPServer:
             
             handler = self.tools[method]
             result = await handler(params, resolved_envid, token)
+            logger.info("Request completed: id=%s method=%s ok=%s", request_id, method, "error" not in (result or {}))
             
             return json.dumps(asdict(MCPResponse(
                 id=request_id,
@@ -128,7 +131,7 @@ class MCPServer:
     async def handle_client(self, reader, writer):
         """Handle a client connection"""
         addr = writer.get_extra_info('peername')
-        logger.info(f"Client connected: {addr}")
+        logger.info("Client connected: %s", addr)
         
         try:
             while True:
@@ -143,11 +146,11 @@ class MCPServer:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.exception(f"Error handling client {addr}")
+            logger.exception("Error handling client %s", addr)
         finally:
             writer.close()
             await writer.wait_closed()
-            logger.info(f"Client disconnected: {addr}")
+            logger.info("Client disconnected: %s", addr)
     
     async def start(self):
         """Start the MCP server"""
@@ -158,7 +161,8 @@ class MCPServer:
         )
         
         addr = server.sockets[0].getsockname()
-        logger.info(f"MCP server listening on {addr[0]}:{addr[1]}")
+        logger.info("MCP server listening on %s:%s", addr[0], addr[1])
+        self.started_event.set()
         
         async with server:
             await server.serve_forever()

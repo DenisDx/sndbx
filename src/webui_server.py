@@ -12,7 +12,6 @@ import fcntl
 import hashlib
 import hmac
 import json
-import logging
 import os
 import pty
 import re
@@ -33,8 +32,10 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, 
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from logging_utils import get_logger
 
-logger = logging.getLogger("sndbx")
+logger = get_logger("webui")
+ssh_logger = get_logger("ssh")
 
 
 def _utc_now() -> datetime:
@@ -233,7 +234,7 @@ class SSHManager:
             "allocated_at": _utc_now().isoformat(),
         }
         self._save(data)
-        logger.info("socat forwarder started: host:%d -> %s:22 (pid %d)", chosen, container_ip, proc.pid)
+        ssh_logger.info("socat forwarder started: host:%d -> %s:22 (pid %d)", chosen, container_ip, proc.pid)
         return True, chosen, None
 
     def close(self, sandbox_id: str) -> bool:
@@ -252,7 +253,7 @@ class SSHManager:
                 except Exception:
                     pass
         self._save(data)
-        logger.info("SSH forwarder closed for sandbox '%s'", sandbox_id)
+        ssh_logger.info("SSH forwarder closed for sandbox '%s'", sandbox_id)
         return True
 
     def cleanup_dead_forwarders(self) -> None:
@@ -262,7 +263,7 @@ class SSHManager:
         for sid, row in list(data.items()):
             pid = row.get("socat_pid")
             if pid and not self._is_alive(int(pid)):
-                logger.info("Removing stale SSH forwarder record for sandbox '%s' (pid %d dead)", sid, pid)
+                ssh_logger.info("Removing stale SSH forwarder record for sandbox '%s' (pid %d dead)", sid, pid)
                 del data[sid]
                 changed = True
         if changed:
@@ -298,6 +299,7 @@ class WebUIServer:
 
         self.app = self._create_app()
         self._server: Optional[uvicorn.Server] = None
+        self.started_event = asyncio.Event()
 
     def _find_user(self, login: str, password: str) -> Optional[Dict[str, Any]]:
         """Return user dict if credentials match."""
@@ -436,6 +438,7 @@ class WebUIServer:
     async def _restart_service_soon(self, delay_seconds: float = 0.4) -> None:
         """Terminate current process after response so systemd can restart service."""
         await asyncio.sleep(max(0.05, float(delay_seconds or 0.0)))
+        os.environ["SNDBX_STOP_REASON"] = "restart requested from Web UI"
         os.kill(os.getpid(), signal.SIGTERM)
 
     def _repair_kata_runtime(self) -> Dict[str, Any]:
@@ -754,6 +757,20 @@ class WebUIServer:
             if detail:
                 last_error = detail
 
+        log_path = self.root_dir / "logs" / "all.log"
+        if log_path.exists():
+            try:
+                text = log_path.read_text(encoding="utf-8")
+                rows = text.splitlines()
+                return {
+                    "ok": True,
+                    "source": "file",
+                    "lines": limit,
+                    "text": "\n".join(rows[-limit:]),
+                }
+            except Exception as exc:
+                last_error = str(exc)
+
         return {
             "ok": False,
             "source": "none",
@@ -1027,6 +1044,14 @@ class WebUIServer:
         """Run uvicorn server."""
         cfg = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info")
         self._server = uvicorn.Server(cfg)
+
+        async def _mark_started() -> None:
+            while self._server is not None and not self._server.started and not self._server.should_exit:
+                await asyncio.sleep(0.05)
+            if self._server is not None and self._server.started:
+                self.started_event.set()
+
+        asyncio.create_task(_mark_started())
         await self._server.serve()
 
     async def stop(self) -> None:

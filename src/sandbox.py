@@ -5,14 +5,14 @@ Manages lifecycle of Docker containers with Kata runtime
 
 import subprocess
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
+from logging_utils import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("sandbox_manager")
 
 
 @dataclass
@@ -577,11 +577,13 @@ pkill -x sshd || true
 
     def execute_command(self, sandbox_id: str, command: str) -> tuple[bool, str]:
         """Execute a command inside the sandbox"""
+        logger.info("Executing command in sandbox '%s': %s", sandbox_id, command)
         success, output = self._run_docker_cmd([
             'exec',
             f'sndbx-{sandbox_id}',
             'bash', '-c', command
         ])
+        logger.info("Command finished in sandbox '%s': success=%s", sandbox_id, success)
         return success, output
 
     def restart_sandbox(self, sandbox_id: str) -> tuple[bool, str]:

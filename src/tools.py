@@ -4,14 +4,14 @@ Core operations: file read/write, command execution, SSH access
 """
 
 import os
-import logging
 import json
 import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from logging_utils import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("mcp")
 
 
 class ToolHandlers:
@@ -29,7 +29,9 @@ class ToolHandlers:
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
+        logger.info("tool_execute_command sandbox=%s", sandbox_id)
         success, output = self.sandbox_manager.execute_command(sandbox_id, command)
+        logger.info("tool_execute_command finished sandbox=%s success=%s", sandbox_id, success)
         return {"success": success, "output": output, "sandbox_id": sandbox_id}
 
     async def tool_read_file(self, params, envid, token):
@@ -40,9 +42,11 @@ class ToolHandlers:
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
+        logger.info("tool_read_file sandbox=%s path=%s", sandbox_id, path)
         success, output = self.sandbox_manager.execute_command(
             sandbox_id, f'cat "{path}" 2>&1'
         )
+        logger.info("tool_read_file finished sandbox=%s success=%s", sandbox_id, success)
         return {"success": success, "content": output, "path": path, "sandbox_id": sandbox_id}
 
     async def tool_write_file(self, params, envid, token):
@@ -54,10 +58,12 @@ class ToolHandlers:
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
+        logger.info("tool_write_file sandbox=%s path=%s bytes=%s", sandbox_id, path, len(str(content)))
         success, output = self.sandbox_manager.execute_command(
             sandbox_id,
             f'mkdir -p "$(dirname {path})" && cat > "{path}" << \'EOF\'\n{content}\nEOF',
         )
+        logger.info("tool_write_file finished sandbox=%s success=%s", sandbox_id, success)
         return {"success": success, "path": path, "sandbox_id": sandbox_id,
                 "message": "File written" if success else output}
 
@@ -66,6 +72,7 @@ class ToolHandlers:
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
+        logger.info("tool_sandbox_status sandbox=%s", sandbox_id)
         status = self.sandbox_manager.get_status(sandbox_id)
         return {"id": status.id, "running": status.running,
                 "container_id": status.container_id, "ip": status.ip, "error": status.error}
@@ -75,6 +82,7 @@ class ToolHandlers:
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
+        logger.info("tool_sandbox_start sandbox=%s", sandbox_id)
         success, output = self.sandbox_manager.start_sandbox(sandbox_id)
         return {"success": success, "message": output, "sandbox_id": sandbox_id}
 
@@ -83,6 +91,7 @@ class ToolHandlers:
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
+        logger.info("tool_sandbox_stop sandbox=%s", sandbox_id)
         success, output = self.sandbox_manager.stop_sandbox(sandbox_id)
         return {"success": success, "message": output, "sandbox_id": sandbox_id}
 
@@ -96,6 +105,7 @@ class ToolHandlers:
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
+        logger.info("tool_mcp_proxy_call sandbox=%s backend_id=%s", sandbox_id, params.get("backend_id", ""))
 
         sandbox_cfg = self.sandbox_manager.sandbox_configs.get(sandbox_id, {})
         rows = sandbox_cfg.get("mcp_bindings", [])

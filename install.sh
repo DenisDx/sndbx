@@ -159,22 +159,23 @@ else
     log_info "Docker network sndbx-net already exists"
 fi
 
-# Setup Python virtual environment (optional but recommended)
+# Setup Python virtual environment and sync dependencies in venv
 VENV_DIR="${SNDBX_ROOT}/venv"
 if [ ! -d "$VENV_DIR" ]; then
     log_info "Creating Python virtual environment..."
     python3 -m venv "$VENV_DIR"
-    # Activate and install dependencies
-    source "$VENV_DIR/bin/activate"
-    pip install --upgrade pip
-    # Install project dependencies
-    if [ -f "${SNDBX_ROOT}/requirements.txt" ]; then
-        pip install -r "${SNDBX_ROOT}/requirements.txt"
-    fi
-    deactivate
-    log_info "Virtual environment created and dependencies installed"
+    log_info "Virtual environment created"
 else
     log_info "Virtual environment already exists"
+fi
+
+log_info "Syncing Python dependencies in venv..."
+"${VENV_DIR}/bin/python3" -m pip install --upgrade pip
+if [ -f "${SNDBX_ROOT}/requirements.txt" ]; then
+    "${VENV_DIR}/bin/python3" -m pip install -r "${SNDBX_ROOT}/requirements.txt"
+    log_info "Dependencies synced from requirements.txt"
+else
+    log_warn "requirements.txt not found; skipping dependency install"
 fi
 
 # Check ports availability
