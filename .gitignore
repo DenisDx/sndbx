@@ -49,3 +49,9 @@ Thumbs.db
 # Project-specific internal docs/instructions
 SPEC.md
 AGENTS.md
+
+# Working config (generated from template during install)
+config.json5
+config.json5.bak
+config.json5.bak.bak
+config.json5.bak.bak.bak

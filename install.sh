@@ -22,7 +22,69 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Script directory (needed early for config template logic below)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DOCKER_SUDO_FALLBACK_USED=false
+
+# ---------------------------------------------------------------------------
+# Config template handling
+# Usage: ./install.sh [config-name]
+#   config-name  name or path of .json5.example template to apply (default: "config").
+#                Extension ".json5.example" is appended if not present.
+# When the parameter is given explicitly OR config.json5 is absent, the script
+# rotates the current config.json5 into up to three .bak backups and copies the
+# chosen template as the new config.json5.
+# ---------------------------------------------------------------------------
+CONFIG_PARAM="${1:-}"
+CONFIG_PARAM_EXPLICIT=false
+if [[ -n "$CONFIG_PARAM" ]]; then
+    CONFIG_PARAM_EXPLICIT=true
+fi
+
+# Resolve template file path
+resolve_config_template() {
+    local name="${1:-config}"
+    # Strip any trailing ".json5.example" / ".json5" so we can normalise.
+    name="${name%.json5.example}"
+    name="${name%.json5}"
+    local resolved="${SCRIPT_DIR}/${name}.json5.example"
+    echo "$resolved"
+}
+
+# Rotate existing config.json5 backups (keeps up to 3 .bak suffixes, deletes older).
+rotate_config_backup() {
+    local cfg="${SCRIPT_DIR}/config.json5"
+    [[ ! -f "$cfg" ]] && return 0
+    local bak3="${cfg}.bak.bak.bak"
+    local bak2="${cfg}.bak.bak"
+    local bak1="${cfg}.bak"
+    [[ -f "$bak3" ]] && rm -f "$bak3"
+    [[ -f "$bak2" ]] && mv "$bak2" "$bak3"
+    [[ -f "$bak1" ]] && mv "$bak1" "$bak2"
+    mv "$cfg" "$bak1"
+    log_info "Rotated config.json5 -> config.json5.bak"
+}
+
+# Determine whether we need to apply a template.
+APPLY_TEMPLATE=false
+if $CONFIG_PARAM_EXPLICIT; then
+    APPLY_TEMPLATE=true
+elif [[ ! -f "${SCRIPT_DIR}/config.json5" ]]; then
+    APPLY_TEMPLATE=true
+    log_info "config.json5 not found — will create from template"
+fi
+
+if $APPLY_TEMPLATE; then
+    TEMPLATE_FILE="$(resolve_config_template "${CONFIG_PARAM:-config}")"
+    if [[ ! -f "$TEMPLATE_FILE" ]]; then
+        log_error "Config template not found: $TEMPLATE_FILE"
+        exit 1
+    fi
+    rotate_config_backup
+    cp "$TEMPLATE_FILE" "${SCRIPT_DIR}/config.json5"
+    log_info "Config applied: $TEMPLATE_FILE -> config.json5"
+fi
 
 # docker_cmd: run docker command with sudo fallback on docker.sock permission errors.
 # input: docker subcommand and args; output: command stdout/stderr and exit code.
@@ -60,9 +122,6 @@ docker_cmd() {
     rm -f "$errfile"
     return "$rc"
 }
-
-# Script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log_info "sndbx installer"
 log_info "Script directory: $SCRIPT_DIR"
