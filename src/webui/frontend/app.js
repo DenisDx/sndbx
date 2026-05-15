@@ -609,6 +609,239 @@ function syncConsoleSizeToBackend() {
   termSocket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
 }
 
+// MCP Test Functions
+function mcpSetStatus(text, ok = false) {
+  const status = $("mcp-status");
+  if (status) {
+    status.textContent = text;
+    status.style.color = ok ? "#4caf86" : "#f0a500";
+  }
+}
+
+function mcpLoadTemplate(template) {
+  const editor = $("mcp-query-editor");
+  const templates = {
+    "tools-list": { jsonrpc: "2.0", id: 1, method: "tools/list" },
+    "resources-list": { jsonrpc: "2.0", id: 1, method: "resources/list" },
+    "prompts-list": { jsonrpc: "2.0", id: 1, method: "prompts/list" },
+    "execute-ls-al": {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "execute_command",
+      params: {
+        command: "ls -al",
+      },
+    },
+    "custom": { jsonrpc: "2.0", id: 1, method: "", params: {} },
+  };
+  if (editor) {
+    editor.value = JSON.stringify(templates[template] || templates["custom"], null, 2);
+  }
+}
+
+function mcpFormatJSON() {
+  const editor = $("mcp-query-editor");
+  if (!editor) return;
+  try {
+    const obj = JSON.parse(editor.value);
+    editor.value = JSON.stringify(obj, null, 2);
+    mcpSetStatus("JSON formatted ✓", true);
+  } catch (e) {
+    mcpSetStatus("Invalid JSON: " + e.message, false);
+  }
+}
+
+function mcpDisplayResults(data) {
+  const results = $("mcp-results");
+  if (results) {
+    results.textContent = JSON.stringify(data, null, 2);
+  }
+}
+
+function mcpGetCheckedValue(name, fallback) {
+  const selected = document.querySelector(`input[name="${name}"]:checked`);
+  return selected ? selected.value : fallback;
+}
+
+function mcpReadConnectionSettings() {
+  const urlInput = $("mcp-server-url");
+  const tokenInput = $("mcp-token");
+  return {
+    serverUrl: ((urlInput && urlInput.value) || "").trim(),
+    token: ((tokenInput && tokenInput.value) || "").trim(),
+    execution: mcpGetCheckedValue("mcp-execution", "backend"),
+    transport: mcpGetCheckedValue("mcp-mode", "http"),
+  };
+}
+
+function mcpBuildDefaultUrl(connectInfo) {
+  const cfgPort = Number((connectInfo && connectInfo.port) || 30081);
+  const port = Number.isFinite(cfgPort) && cfgPort > 0 ? cfgPort : 30081;
+
+  const currentHost = (window.location.hostname || "").trim();
+  let host = ((connectInfo && connectInfo.default_host) || "").trim();
+  if (currentHost && currentHost !== "0.0.0.0" && currentHost !== "::" && currentHost !== "[::]") {
+    host = currentHost;
+  }
+  if (!host || host === "0.0.0.0" || host === "::" || host === "[::]") {
+    host = "127.0.0.1";
+  }
+
+  return `http://${host}:${port}`;
+}
+
+async function mcpInitConnectionDefaults() {
+  const urlInput = $("mcp-server-url");
+  if (!urlInput || (urlInput.value || "").trim()) {
+    return;
+  }
+
+  const connectInfo = await apiGet("/api/mcp/connect-info");
+  urlInput.value = mcpBuildDefaultUrl(connectInfo || {});
+}
+
+async function mcpCallBackend(request, settings) {
+  const resp = await apiPost("/api/mcp/call", {
+    method: request.method,
+    params: request.params || {},
+    server_url: settings.serverUrl,
+    token: settings.token,
+  });
+  if (!resp.ok && !(resp.data && resp.data.error)) {
+    return { error: `Backend HTTP ${resp.status}` };
+  }
+  return resp.data;
+}
+
+async function mcpGetToolsBackend(settings) {
+  const resp = await apiPost("/api/mcp/tools", {
+    server_url: settings.serverUrl,
+    token: settings.token,
+  });
+  if (!resp.ok && !(resp.data && resp.data.error)) {
+    return { error: `Backend HTTP ${resp.status}` };
+  }
+  return resp.data;
+}
+
+async function mcpCallFrontendDirect(request, settings) {
+  if (!settings.serverUrl) {
+    return { error: "MCP server URL is required for frontend mode" };
+  }
+
+  const headers = {
+    "Content-Type": "application/json",
+  };
+  if (settings.token) {
+    headers.Authorization = /^Bearer\s+/i.test(settings.token)
+      ? settings.token
+      : `Bearer ${settings.token}`;
+  }
+  if (settings.transport === "sse") {
+    headers.Accept = "text/event-stream, application/json";
+  }
+
+  try {
+    const response = await fetch(settings.serverUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+
+    const contentType = (response.headers.get("content-type") || "").toLowerCase();
+    let payload;
+    if (contentType.includes("application/json")) {
+      payload = await response.json().catch(() => ({}));
+    } else {
+      const text = await response.text().catch(() => "");
+      payload = { raw: text };
+    }
+
+    if (!response.ok) {
+      return {
+        error: `Frontend direct HTTP ${response.status}`,
+        response: payload,
+      };
+    }
+    return payload;
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+}
+
+async function mcpGetTools() {
+  try {
+    await mcpInitConnectionDefaults();
+    const settings = mcpReadConnectionSettings();
+    mcpSetStatus(`Loading tools (${settings.execution}/${settings.transport})...`, false);
+
+    const resp = settings.execution === "frontend"
+      ? await mcpCallFrontendDirect({ jsonrpc: "2.0", id: 1, method: "tools/list" }, settings)
+      : await mcpGetToolsBackend(settings);
+
+    mcpDisplayResults(resp);
+    mcpSetStatus(resp && resp.error ? `Error: ${resp.error}` : "Tools loaded", !(resp && resp.error));
+  } catch (e) {
+    mcpSetStatus("Error: " + e.message, false);
+    mcpDisplayResults({ error: e.message });
+  }
+}
+
+async function mcpSendRequest() {
+  const editor = $("mcp-query-editor");
+  if (!editor) return;
+
+  try {
+    const request = JSON.parse(editor.value);
+    await mcpInitConnectionDefaults();
+    const settings = mcpReadConnectionSettings();
+    mcpSetStatus(`Sending request (${settings.execution}/${settings.transport})...`, false);
+
+    const resp = settings.execution === "frontend"
+      ? await mcpCallFrontendDirect(request, settings)
+      : await mcpCallBackend(request, settings);
+
+    mcpDisplayResults(resp);
+    mcpSetStatus(resp && resp.error ? `Error: ${resp.error}` : "Request sent", !(resp && resp.error));
+  } catch (e) {
+    mcpSetStatus("Error: " + e.message, false);
+    mcpDisplayResults({ error: e.message });
+  }
+}
+
+function mcpClearResults() {
+  const results = $("mcp-results");
+  const editor = $("mcp-query-editor");
+  if (results) results.textContent = "";
+  if (editor) editor.value = "";
+  mcpSetStatus("Cleared", true);
+}
+
+// Init MCP test page
+function initMCPTest() {
+  const getToolsBtn = $("mcp-get-tools-btn");
+  const sendBtn = $("mcp-send-btn");
+  const formatBtn = $("mcp-format-btn");
+  const clearBtn = $("mcp-clear-results-btn");
+  const serverUrlInput = $("mcp-server-url");
+
+  if (getToolsBtn) getToolsBtn.addEventListener("click", mcpGetTools);
+  if (sendBtn) sendBtn.addEventListener("click", mcpSendRequest);
+  if (formatBtn) formatBtn.addEventListener("click", mcpFormatJSON);
+  if (clearBtn) clearBtn.addEventListener("click", mcpClearResults);
+  if (serverUrlInput) {
+    serverUrlInput.addEventListener("focus", () => {
+      if (!serverUrlInput.value.trim()) {
+        mcpInitConnectionDefaults();
+      }
+    });
+  }
+
+  // Set default template
+  mcpLoadTemplate("tools-list");
+  mcpInitConnectionDefaults();
+}
+
 $("login-btn").addEventListener("click", onLogin);
 $("pass-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") onLogin();
@@ -629,6 +862,7 @@ window.addEventListener("resize", () => {
   if (me && me.ok) {
     showScreen("app");
     showPage("dashboard");
+    initMCPTest();  // Initialize MCP test page
     await loadDashboard();
     refreshTimer = setInterval(loadDashboard, 3000);
   } else {

@@ -23,10 +23,12 @@ import subprocess
 import termios
 import tty
 import asyncio
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import aiohttp
 import uvicorn
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.staticfiles import StaticFiles
@@ -270,10 +272,82 @@ class SSHManager:
             self._save(data)
 
 
+class MCPClient:
+    """Client for connecting to MCP server."""
+
+    def __init__(self, host: str, port: int, token: str = "", timeout: float = 10.0):
+        self.host = host
+        self.port = port
+        self.token = token
+        self.timeout = timeout
+
+    def _url(self) -> str:
+        """Build MCP HTTP endpoint URL."""
+        return f"http://{self.host}:{self.port}/mcp"
+
+    async def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Send one MCP JSON-RPC request via HTTP POST."""
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self._url(), json=payload, headers=headers) as response:
+                    data = await response.json(content_type=None)
+                    if response.status >= 400 and not isinstance(data, dict):
+                        return {"error": f"HTTP {response.status}", "response": data}
+                    if isinstance(data, dict):
+                        return data
+                    return {"error": "Invalid response format", "response": data}
+        except asyncio.TimeoutError:
+            return {"error": f"Connection timeout after {self.timeout}s"}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    async def get_tools(self) -> Dict[str, Any]:
+        """Get list of tools from MCP server."""
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        }
+        if self.token:
+            request["token"] = self.token
+        return await self._post(request)
+
+    async def call_tool(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a tool on MCP server."""
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }
+        if self.token:
+            request["token"] = self.token
+        return await self._post(request)
+
+
 class ActionRequest(BaseModel):
     """Dashboard action payload."""
 
     action: str
+
+
+class MCPCallRequest(BaseModel):
+    """MCP tool call request."""
+    method: str
+    params: Dict[str, Any] = {}
+    server_url: str = ""
+    token: str = ""
+
+
+class MCPToolsRequest(BaseModel):
+    """MCP tools list request."""
+    server_url: str = ""
+    token: str = ""
 
 
 class WebUIServer:
@@ -322,6 +396,38 @@ class WebUIServer:
         if len(compact) > 320:
             compact = compact[:317] + "..."
         return f"Image '{image_ref}' {action_name} failed: {compact}"
+
+    def _mcp_config_target(self) -> tuple[str, int, str]:
+        """Return default MCP host, port and token from config."""
+        mcp_config = self.config.get("mcp", {})
+        host = str(mcp_config.get("bind", "127.0.0.1"))
+        port = int(mcp_config.get("port", 30081))
+        token = ""
+        auth_config = mcp_config.get("auth", {})
+        if auth_config.get("mode") == "token":
+            tokens = auth_config.get("tokens", [])
+            if tokens:
+                token = str(tokens[0])
+        return host, port, token
+
+    def _resolve_mcp_target(self, server_url: str, token_override: str = "") -> tuple[str, int, str, Optional[str]]:
+        """Resolve MCP target from UI URL override or fallback config."""
+        cfg_host, cfg_port, cfg_token = self._mcp_config_target()
+
+        token = (token_override or "").strip() or cfg_token
+        raw = (server_url or "").strip()
+        if not raw:
+            return cfg_host, cfg_port, token, None
+
+        # Accept both full URLs and plain host:port values.
+        parsed = urlparse(raw if "://" in raw else f"tcp://{raw}")
+        host = (parsed.hostname or "").strip()
+        port = parsed.port
+
+        if not host or not port:
+            return "", 0, "", "server_url must include host and port"
+
+        return host, int(port), token, None
 
     async def _require_session(self, sndbx_session: Optional[str] = Cookie(default=None)) -> Dict[str, Any]:
         """Require valid session cookie."""
@@ -1034,6 +1140,51 @@ class WebUIServer:
                         proc.wait(timeout=2)
                     except Exception:
                         proc.kill()
+
+        @app.get("/api/mcp/connect-info")
+        async def mcp_connect_info(request: Request, session: Dict[str, Any] = Depends(self._require_session)):
+            mcp_config = self.config.get("mcp", {})
+            bind_host = str(mcp_config.get("bind", "127.0.0.1"))
+            port = int(mcp_config.get("port", 30081))
+            request_host = str(request.url.hostname or "").strip()
+
+            default_host = request_host
+            if default_host in ("", "0.0.0.0", "::", "[::]"):
+                default_host = bind_host
+            if default_host in ("0.0.0.0", "::", "[::]"):
+                default_host = "127.0.0.1"
+
+            return {
+                "host": bind_host,
+                "port": port,
+                "default_host": default_host,
+                "default_url": f"http://{default_host}:{port}",
+            }
+
+        @app.get("/api/mcp/tools")
+        async def mcp_get_tools(session: Dict[str, Any] = Depends(self._require_session)):
+            host, port, token = self._mcp_config_target()
+            client = MCPClient(host, port, token=token)
+            return await client.get_tools()
+
+        @app.post("/api/mcp/tools")
+        async def mcp_get_tools_proxy(body: MCPToolsRequest, session: Dict[str, Any] = Depends(self._require_session)):
+            host, port, token, error = self._resolve_mcp_target(body.server_url, body.token)
+            if error:
+                return {"error": error}
+
+            client = MCPClient(host, port, token=token)
+            return await client.get_tools()
+
+        @app.post("/api/mcp/call")
+        async def mcp_call(body: MCPCallRequest, session: Dict[str, Any] = Depends(self._require_session)):
+            host, port, token, error = self._resolve_mcp_target(body.server_url, body.token)
+            if error:
+                return {"error": error}
+
+            client = MCPClient(host, port, token=token)
+            result = await client.call_tool(body.method, body.params)
+            return result
 
         # Serve frontend last so API routes take priority.
         app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")

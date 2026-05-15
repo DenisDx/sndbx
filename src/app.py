@@ -208,7 +208,7 @@ class SNDBXApp:
         """Stop all services gracefully"""
         if self.mcp_server:
             self.logger.info("Closing MCP server...")
-            # TODO: implement graceful shutdown for MCP server
+            await self.mcp_server.stop()
 
         if self.webui_server:
             self.logger.info("Closing Web UI server...")

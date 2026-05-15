@@ -159,7 +159,95 @@
     min-height: 0;
     margin-bottom: 0;
   }
-</style>
+
+  #mcp-query-editor {
+    width: 100%;
+    min-height: 200px;
+    font-family: "Courier New", monospace;
+    font-size: 13px;
+    padding: 10px;
+    background: #0b0d13;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    resize: vertical;
+  }
+
+  #mcp-results {
+    width: 100%;
+    min-height: 150px;
+    max-height: 400px;
+    font-family: "Courier New", monospace;
+    font-size: 12px;
+    padding: 10px;
+    background: #0b0d13;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    resize: vertical;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .mcp-section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  .mcp-templates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .mcp-templates button {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .mcp-templates button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .mcp-form-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .mcp-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .mcp-field input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  .mcp-options-row {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+  }</style>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 </head>
 <body>
@@ -179,6 +267,7 @@
       <button id="nav-dashboard" class="active" onclick="showPage('dashboard')">Dashboard</button>
       <button id="nav-settings" onclick="showPage('settings')">Settings</button>
       <button id="nav-console" onclick="showPage('console')">Console</button>
+      <button id="nav-mcp" onclick="showPage('mcp')">MCP test</button>
       <span class="spacer"></span>
       <span id="service-indicator" class="badge ok">Online</span>
       <button id="restart-service-btn">Restart Service</button>
@@ -282,6 +371,66 @@
         </div>
         <div id="console-terminal"></div>
         <div id="console-status" class="muted" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <div id="page-mcp" class="page">
+      <div class="mcp-section">
+        <div class="card-title">Connection</div>
+        <div class="mcp-form-grid">
+          <label class="mcp-field">
+            <span class="muted">MCP server URL</span>
+            <input id="mcp-server-url" type="text" placeholder="http://127.0.0.1:30081">
+          </label>
+          <label class="mcp-field">
+            <span class="muted">Token (optional)</span>
+            <input id="mcp-token" type="text" placeholder="Bearer token or raw token">
+          </label>
+        </div>
+        <div class="mcp-options-row" style="margin-bottom: 10px;">
+          <label style="display: flex; align-items: center; gap: 6px;">
+            <input type="radio" name="mcp-execution" value="backend" checked> Backend proxy
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px;">
+            <input type="radio" name="mcp-execution" value="frontend"> Frontend direct
+          </label>
+        </div>
+        <div class="mcp-options-row" style="margin-bottom: 12px;">
+          <label style="display: flex; align-items: center; gap: 6px;">
+            <input type="radio" name="mcp-mode" value="http" checked> HTTP
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px;">
+            <input type="radio" name="mcp-mode" value="sse"> SSE
+          </label>
+        </div>
+        <button id="mcp-get-tools-btn" style="padding: 8px 16px; border: 1px solid var(--border); background: var(--accent); color: #fff; border-radius: 6px; cursor: pointer;">Load Tools</button>
+        <button id="mcp-clear-results-btn" style="padding: 8px 16px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 6px; cursor: pointer; margin-left: 8px;">Clear</button>
+        <div id="mcp-status" class="muted" style="margin-top: 10px;"></div>
+      </div>
+
+      <div class="mcp-section">
+        <div class="card-title">Template Requests</div>
+        <div class="mcp-templates">
+          <button onclick="mcpLoadTemplate('tools-list')">List Tools</button>
+          <button onclick="mcpLoadTemplate('resources-list')">List Resources</button>
+          <button onclick="mcpLoadTemplate('prompts-list')">List Prompts</button>
+          <button onclick="mcpLoadTemplate('execute-ls-al')">Execute ls -al</button>
+          <button onclick="mcpLoadTemplate('custom')">Custom Request</button>
+        </div>
+      </div>
+
+      <div class="mcp-section">
+        <div class="card-title">Request (JSON)</div>
+        <textarea id="mcp-query-editor" placeholder='{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'></textarea>
+        <div style="margin-top: 10px; display: flex; gap: 8px;">
+          <button id="mcp-send-btn" style="padding: 8px 16px; border: 1px solid var(--border); background: var(--accent); color: #fff; border-radius: 6px; cursor: pointer;">Send Request</button>
+          <button id="mcp-format-btn" style="padding: 8px 16px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 6px; cursor: pointer;">Format JSON</button>
+        </div>
+      </div>
+
+      <div class="mcp-section">
+        <div class="card-title">Response</div>
+        <div id="mcp-results" placeholder="Results will appear here..."></div>
       </div>
     </div>
   </div>

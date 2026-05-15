@@ -211,6 +211,94 @@ Then open Web UI on the configured host and port from `.env` and `config.json5`.
 
 The MCP (Model Context Protocol) server runs on the port configured in `.env` (default: `30081`).
 
+### HTTP/SSE Endpoints (Current Transport)
+
+sndbx MCP now exposes HTTP endpoints on the MCP port:
+
+- `POST /`
+- `POST /mcp`
+- `POST /mcp/v1`
+
+Legacy compatibility endpoints:
+
+- `GET /sse`
+- `POST /messages`
+
+All examples below use the default token from `config.json5`.
+
+Basic tools list via `POST /mcp`:
+
+```bash
+curl -X POST http://127.0.0.1:30081/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-123456789" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/list"
+  }'
+```
+
+The same request via root endpoint `POST /`:
+
+```bash
+curl -X POST http://127.0.0.1:30081/ \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-123456789" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/list"
+  }'
+```
+
+Versioned endpoint `POST /mcp/v1`:
+
+```bash
+curl -X POST http://127.0.0.1:30081/mcp/v1 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-123456789" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/list"
+  }'
+```
+
+Streamable HTTP mode (SSE response stream):
+
+```bash
+curl -N -X POST 'http://127.0.0.1:30081/mcp?stream=1' \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "Authorization: Bearer test-token-123456789" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 10,
+    "method": "tools/list"
+  }'
+```
+
+Legacy SSE handshake:
+
+```bash
+curl -N 'http://127.0.0.1:30081/sse?session_id=demo-session'
+```
+
+Legacy message publish:
+
+```bash
+curl -X POST 'http://127.0.0.1:30081/messages?session_id=demo-session' \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-123456789" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 11,
+    "method": "tools/list",
+    "session_id": "demo-session"
+  }'
+```
+
 
 ### 1. Start sndbx Application
 
