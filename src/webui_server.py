@@ -317,14 +317,13 @@ class MCPClient:
             request["token"] = self.token
         return await self._post(request)
 
-    async def call_tool(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Call a tool on MCP server."""
-        request = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }
+    async def call_tool(self, request_obj: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a prepared JSON-RPC object to MCP server.
+
+        Input: request object from UI.
+        Output: parsed JSON response map.
+        """
+        request = dict(request_obj or {})
         if self.token:
             request["token"] = self.token
         return await self._post(request)
@@ -338,6 +337,7 @@ class ActionRequest(BaseModel):
 
 class MCPCallRequest(BaseModel):
     """MCP tool call request."""
+    request: Dict[str, Any] = {}
     method: str
     params: Dict[str, Any] = {}
     server_url: str = ""
@@ -1229,7 +1229,13 @@ class WebUIServer:
                 return {"error": error}
 
             client = MCPClient(host, port, token=token)
-            result = await client.call_tool(body.method, body.params)
+            request_obj = body.request if isinstance(body.request, dict) and body.request else {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": body.method,
+                "params": body.params,
+            }
+            result = await client.call_tool(request_obj)
             return result
 
         # Serve frontend last so API routes take priority.

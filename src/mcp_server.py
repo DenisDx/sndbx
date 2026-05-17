@@ -6,7 +6,7 @@ Provides streamable HTTP endpoints and legacy SSE/message endpoints.
 import asyncio
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 from typing import Any, Callable, Dict, List, Optional
@@ -28,7 +28,7 @@ class MCPResponse:
 
     id: Any
     result: Optional[Any] = None
-    error: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
 
 
 class MCPServer:
@@ -245,7 +245,65 @@ class MCPServer:
         Input: request id and error text.
         """
 
-        return asdict(MCPResponse(id=req_id, error=message))
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {
+                "code": -32000,
+                "message": message,
+            },
+        }
+
+    @staticmethod
+    def _json_result(req_id: Any, result: Any) -> Dict[str, Any]:
+        """Build JSON-RPC success response.
+
+        Output: JSON response dict.
+        Input: request id and result payload.
+        """
+
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": result,
+        }
+
+    @staticmethod
+    def _to_text_content(result: Any) -> str:
+        """Render tool result payload as text content.
+
+        Output: textual representation.
+        Input: any tool result object.
+        """
+
+        if isinstance(result, str):
+            return result
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    def _format_tool_result(self, result: Any) -> Dict[str, Any]:
+        """Convert handler output to MCP tools/call result shape.
+
+        Output: MCP-compliant tool result object.
+        Input: raw tool handler result.
+        """
+
+        if isinstance(result, dict) and isinstance(result.get("content"), list):
+            formatted = {"content": result.get("content", [])}
+            if "structuredContent" in result:
+                formatted["structuredContent"] = result["structuredContent"]
+            if "isError" in result:
+                formatted["isError"] = bool(result["isError"])
+            return formatted
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": self._to_text_content(result),
+                }
+            ],
+            "structuredContent": result,
+        }
 
     def _extract_token(self, req_json: Dict[str, Any], request: web.Request) -> Optional[str]:
         """Extract auth token from payload or Authorization header.
@@ -282,8 +340,34 @@ class MCPServer:
         params = req_json.get("params", {})
         envid = req_json.get("envid")
         token = self._extract_token(req_json, request)
+
+        resolved_method = method
+        resolved_params = params if isinstance(params, dict) else {}
+        if method == "tools/call":
+            if not isinstance(params, dict):
+                response = self._json_error(request_id, "Invalid params for tools/call")
+                logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+                self._log_rpc("response", response)
+                return response
+            tool_name = params.get("name")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                response = self._json_error(request_id, "Invalid or missing tool name in params.name")
+                logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+                self._log_rpc("response", response)
+                return response
+            arguments = params.get("arguments", {})
+            if arguments is None:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                response = self._json_error(request_id, "Invalid params.arguments for tools/call")
+                logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+                self._log_rpc("response", response)
+                return response
+            resolved_method = tool_name.strip()
+            resolved_params = arguments
+
         self._log_rpc("request", req_json)
-        handler = self.tools.get(method) if isinstance(method, str) else None
+        handler = self.tools.get(resolved_method) if isinstance(resolved_method, str) else None
         if isinstance(method, str) and method in {"tools/list", "resources/list", "prompts/list"}:
             call_target = f"builtin:{method}"
         elif handler is not None:
@@ -313,13 +397,13 @@ class MCPServer:
             return response
 
         if method == "resources/list":
-            response = {"id": request_id, "result": {"resources": []}, "error": None}
+            response = self._json_result(request_id, {"resources": []})
             logger.info("RPC response: id=%s method=%s ok=true", request_id, method)
             self._log_rpc("response", response)
             return response
 
         if method == "prompts/list":
-            response = {"id": request_id, "result": {"prompts": []}, "error": None}
+            response = self._json_result(request_id, {"prompts": []})
             logger.info("RPC response: id=%s method=%s ok=true", request_id, method)
             self._log_rpc("response", response)
             return response
@@ -331,29 +415,29 @@ class MCPServer:
             return response
 
         resolved_envid = self.resolve_envid(token, envid)
-        logger.info("Request received: id=%s method=%s envid=%s", request_id, method, resolved_envid or envid)
+        logger.info("Request received: id=%s method=%s tool=%s envid=%s", request_id, method, resolved_method, resolved_envid or envid)
         if not resolved_envid:
             response = self._json_error(request_id, "No access to requested envid or sandbox")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
             self._log_rpc("response", response)
             return response
 
-        handler = self.tools.get(method)
+        handler = self.tools.get(resolved_method)
         if handler is None:
-            response = self._json_error(request_id, f"Unknown tool: {method}")
+            response = self._json_error(request_id, f"Unknown tool: {resolved_method}")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
             self._log_rpc("response", response)
             return response
 
         try:
-            result = await handler(params if isinstance(params, dict) else {}, resolved_envid, token)
-            logger.info("Request completed: id=%s method=%s ok=%s", request_id, method, "error" not in (result or {}))
-            response = asdict(MCPResponse(id=request_id, result=result))
+            result = await handler(resolved_params, resolved_envid, token)
+            logger.info("Request completed: id=%s method=%s tool=%s ok=%s", request_id, method, resolved_method, "error" not in (result or {}))
+            response = self._json_result(request_id, self._format_tool_result(result))
             logger.info("RPC response: id=%s method=%s ok=true", request_id, method)
             self._log_rpc("response", response)
             return response
         except Exception as exc:
-            logger.exception("Error handling request id=%s method=%s", request_id, method)
+            logger.exception("Error handling request id=%s method=%s tool=%s", request_id, method, resolved_method)
             response = self._json_error(request_id, f"Internal error: {exc}")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
             self._log_rpc("response", response)

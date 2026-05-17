@@ -750,9 +750,12 @@ function mcpLoadTemplate(template) {
     "execute-ls-al": {
       jsonrpc: "2.0",
       id: 1,
-      method: "execute_command",
+      method: "tools/call",
       params: {
-        command: "ls -al",
+        name: "execute_command",
+        arguments: {
+          command: "ls -al",
+        },
       },
     },
     "custom": { jsonrpc: "2.0", id: 1, method: "", params: {} },
@@ -824,9 +827,13 @@ async function mcpInitConnectionDefaults() {
 }
 
 async function mcpCallBackend(request, settings) {
+  const method = (request && request.method) || "";
+  const params = (request && request.params) || {};
   const resp = await apiPost("/api/mcp/call", {
-    method: request.method,
-    params: request.params || {},
+    request,
+    // Compatibility fields for older backends.
+    method,
+    params,
     server_url: settings.serverUrl,
     token: settings.token,
   });
