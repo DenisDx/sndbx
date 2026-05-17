@@ -7,6 +7,8 @@ import asyncio
 import json
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from aiohttp import web
@@ -37,9 +39,23 @@ class MCPServer:
         self.port = port
         self.config = config
         self.tools: Dict[str, Callable] = {}
+        self.tool_specs: Dict[str, Dict[str, Any]] = {}
         self.tokens = config.get("mcp", {}).get("auth", {}).get("tokens", [])
         self.sandbox_manager = None
         self.started_event = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
+
+        # JSONL request log
+        self._request_log_file = None
+        if config.get("logging", {}).get("log_mcp_requests", False):
+            root = config.get("root", ".")
+            log_path = os.path.join(root, "logs", "mcp_requests.jsonl")
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            try:
+                self._request_log_file = open(log_path, "a", encoding="utf-8", buffering=1)  # line-buffered
+                logger.info("MCP request log: %s", log_path)
+            except OSError as exc:
+                logger.error("Cannot open MCP request log %s: %s", log_path, exc)
 
         self._app = web.Application()
         self._runner: Optional[web.AppRunner] = None
@@ -69,7 +85,13 @@ class MCPServer:
         names = self._published_tools()
         logger.info("Published tools (%s): count=%d names=%s", reason, len(names), ",".join(names) if names else "-")
 
-    def register_tool(self, name: str, handler: Callable) -> None:
+    def register_tool(
+        self,
+        name: str,
+        handler: Callable,
+        description: Optional[str] = None,
+        input_schema: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Register a tool handler.
 
         Output: None.
@@ -77,8 +99,27 @@ class MCPServer:
         """
 
         self.tools[name] = handler
+        self.tool_specs[name] = {
+            "name": name,
+            "description": description or "",
+            "inputSchema": input_schema or {"type": "object", "properties": {}, "required": []},
+        }
         logger.info("Registered tool: %s", name)
         self._log_published_tools("register")
+
+    def _tools_list_response(self, request_id: Any) -> Dict[str, Any]:
+        """Build JSON-RPC tools/list response with tool metadata.
+
+        Output: JSON-RPC response dict with full MCP tool descriptors.
+        Input: request id.
+        """
+
+        tools = [self.tool_specs[name] for name in sorted(self.tool_specs.keys())]
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"tools": tools},
+        }
 
     def validate_token(self, token: Optional[str]) -> bool:
         """Validate authentication token.
@@ -165,6 +206,20 @@ class MCPServer:
 
         self._app.middlewares.append(request_logging_middleware)
 
+    def _log_rpc(self, type_: str, data: Any) -> None:
+        """Append one JSONL entry to the request log if enabled.
+
+        Output: None.
+        Input: entry type ('request'/'response') and JSON-serialisable data.
+        """
+        if self._request_log_file is None:
+            return
+        try:
+            entry = {"type": type_, "ts": datetime.now(timezone.utc).isoformat(), "data": data}
+            self._request_log_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning("Failed to write MCP request log entry: %s", exc)
+
     def _cors_headers(self, request: web.Request) -> Dict[str, str]:
         """Build CORS headers for browser-based MCP calls.
 
@@ -227,44 +282,52 @@ class MCPServer:
         params = req_json.get("params", {})
         envid = req_json.get("envid")
         token = self._extract_token(req_json, request)
+        self._log_rpc("request", req_json)
+        handler = self.tools.get(method) if isinstance(method, str) else None
+        if isinstance(method, str) and method in {"tools/list", "resources/list", "prompts/list"}:
+            call_target = f"builtin:{method}"
+        elif handler is not None:
+            call_target = f"tool:{getattr(handler, '__name__', '<anonymous>')}"
+        else:
+            call_target = "handler:not_found"
         logger.info(
-            "RPC request: peer=%s id=%s method=%s has_params=%s envid=%s",
+            "RPC request: peer=%s id=%s method=%s has_params=%s call_target=%s envid=%s",
             request.remote or "unknown",
             request_id,
             method,
             isinstance(params, dict) and bool(params),
+            call_target,
             envid,
         )
 
         if not isinstance(method, str) or not method.strip():
             response = self._json_error(request_id, "Invalid or missing method")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+            self._log_rpc("response", response)
             return response
 
         if method == "tools/list":
-            response = {
-                "id": request_id,
-                "result": {
-                    "tools": [{"name": name} for name in sorted(self.tools.keys())],
-                },
-                "error": None,
-            }
+            response = self._tools_list_response(request_id)
             logger.info("RPC response: id=%s method=%s ok=true tools_count=%d", request_id, method, len(self.tools))
+            self._log_rpc("response", response)
             return response
 
         if method == "resources/list":
             response = {"id": request_id, "result": {"resources": []}, "error": None}
             logger.info("RPC response: id=%s method=%s ok=true", request_id, method)
+            self._log_rpc("response", response)
             return response
 
         if method == "prompts/list":
             response = {"id": request_id, "result": {"prompts": []}, "error": None}
             logger.info("RPC response: id=%s method=%s ok=true", request_id, method)
+            self._log_rpc("response", response)
             return response
 
         if not self.validate_token(token):
             response = self._json_error(request_id, "Invalid or missing token")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+            self._log_rpc("response", response)
             return response
 
         resolved_envid = self.resolve_envid(token, envid)
@@ -272,12 +335,14 @@ class MCPServer:
         if not resolved_envid:
             response = self._json_error(request_id, "No access to requested envid or sandbox")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+            self._log_rpc("response", response)
             return response
 
         handler = self.tools.get(method)
         if handler is None:
             response = self._json_error(request_id, f"Unknown tool: {method}")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+            self._log_rpc("response", response)
             return response
 
         try:
@@ -285,11 +350,13 @@ class MCPServer:
             logger.info("Request completed: id=%s method=%s ok=%s", request_id, method, "error" not in (result or {}))
             response = asdict(MCPResponse(id=request_id, result=result))
             logger.info("RPC response: id=%s method=%s ok=true", request_id, method)
+            self._log_rpc("response", response)
             return response
         except Exception as exc:
             logger.exception("Error handling request id=%s method=%s", request_id, method)
             response = self._json_error(request_id, f"Internal error: {exc}")
             logger.info("RPC response: id=%s method=%s ok=false error=%s", request_id, method, response.get("error"))
+            self._log_rpc("response", response)
             return response
 
     async def _parse_http_requests(self, request: web.Request) -> tuple[List[Dict[str, Any]], Optional[str]]:
@@ -475,9 +542,10 @@ class MCPServer:
         logger.info("MCP HTTP server listening on %s:%s", self.host, self.port)
         self._log_published_tools("startup")
         self.started_event.set()
+        self._shutdown_event.clear()
 
-        # Keep task alive until stop() cancels this wait.
-        await asyncio.Event().wait()
+        # Keep task alive until stop() signals shutdown.
+        await self._shutdown_event.wait()
 
     async def stop(self):
         """Stop HTTP MCP server gracefully.
@@ -493,3 +561,12 @@ class MCPServer:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+
+        self._shutdown_event.set()
+
+        if self._request_log_file is not None:
+            try:
+                self._request_log_file.close()
+            except OSError:
+                pass
+            self._request_log_file = None

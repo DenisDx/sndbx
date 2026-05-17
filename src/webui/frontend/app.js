@@ -9,6 +9,8 @@ let termSocket = null;
 let consoleLoaded = false;
 let termDataDisposable = null;
 let logPanelBound = false;
+let restartInProgress = false;
+let suppressAutoLogout = false;
 
 function showScreen(name) {
   $("login-screen").style.display = name === "login" ? "flex" : "none";
@@ -56,7 +58,9 @@ async function apiGet(url) {
   try {
     const r = await fetch(url, { credentials: "include" });
     if (r.status === 401) {
-      doLogout();
+      if (!suppressAutoLogout) {
+        doLogout();
+      }
       return null;
     }
     return r.ok ? r.json().catch(() => null) : null;
@@ -75,6 +79,30 @@ function setServiceIndicator(text, state = "neutral") {
   } else if (state === "bad") {
     el.classList.add("bad");
   }
+}
+
+function setRestartBanner(active, text) {
+  const banner = $("restart-banner");
+  const label = $("restart-banner-text");
+  if (!banner) return;
+
+  if (active) {
+    banner.classList.add("active");
+    if (label) {
+      label.textContent = text || "Service is restarting...";
+    }
+    return;
+  }
+
+  banner.classList.remove("active");
+  if (label) {
+    label.textContent = "Service is restarting...";
+  }
+}
+
+function readServiceState(data) {
+  const state = String((data && data.service_state) || "").trim().toLowerCase();
+  return state || "online";
 }
 
 function renderHealth(health) {
@@ -233,28 +261,119 @@ async function restartService() {
     return;
   }
 
+  const restartBtn = $("restart-service-btn");
+  if (restartBtn) restartBtn.disabled = true;
+  restartInProgress = true;
+  suppressAutoLogout = true;
+
   setServiceIndicator("Restarting...", "neutral");
-  const res = await apiPost("/api/service/restart", {});
-  if (!res.ok) {
-    setServiceIndicator("Online", "ok");
-    setDashMessage((res.data && (res.data.detail || res.data.error)) || "Service restart failed", false);
+  setRestartBanner(true, "Service is restarting. Reconnecting...");
+  appendLocalLogLine("[webui] Service restart requested from UI");
+  let requestAccepted = false;
+  try {
+    const res = await apiPost("/api/service/restart", {});
+    requestAccepted = !!res.ok;
+    if (requestAccepted) {
+      setDashMessage("Service restart requested. Waiting for service (0s)...", true);
+    } else {
+      const msg = (res.data && (res.data.detail || res.data.error)) || "Restart request response was not OK";
+      setDashMessage(`${msg}. Waiting for service state...`, false);
+      appendLocalLogLine(`[webui] Restart request returned non-OK response: ${msg}`);
+    }
+  } catch (e) {
+    setDashMessage("Connection dropped while requesting restart. Waiting for service state...", false);
+    appendLocalLogLine("[webui] Restart request connection dropped; continuing reconnect wait");
+  }
+
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+
+  const reconnectDeadlineMs = Date.now() + 90_000;
+  let online = false;
+  let attempt = 0;
+  while (Date.now() < reconnectDeadlineMs) {
+    attempt += 1;
+    const data = await apiGet("/api/status");
+    const state = readServiceState(data);
+    if (data && state === "online") {
+      online = true;
+      break;
+    }
+    if (data && state === "restarting") {
+      const elapsedSec = Math.floor((90_000 - (reconnectDeadlineMs - Date.now())) / 1000);
+      setServiceIndicator(`Restarting... ${elapsedSec}s`, "neutral");
+      setDashMessage(`Service is restarting, reconnect attempt ${attempt}...`, true);
+      setRestartBanner(true, `Service is restarting. Reconnect attempt ${attempt} (${elapsedSec}s)`);
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      continue;
+    }
+
+    const elapsedSec = Math.floor((90_000 - (reconnectDeadlineMs - Date.now())) / 1000);
+    setServiceIndicator(`Restarting... ${elapsedSec}s`, "neutral");
+    const baseText = requestAccepted
+      ? "Service is restarting"
+      : "Restart requested (response uncertain), waiting for service";
+    setDashMessage(`${baseText}, reconnect attempt ${attempt}...`, true);
+    setRestartBanner(true, `Service is restarting. Reconnect attempt ${attempt} (${elapsedSec}s)`);
+    // Retry quickly while service restarts; keep current page rendered.
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+  }
+
+  if (!online) {
+    restartInProgress = false;
+    suppressAutoLogout = false;
+    setRestartBanner(false);
+    setServiceIndicator("Unavailable", "bad");
+    setDashMessage("Service restart is taking longer than expected", false);
+    appendLocalLogLine("[webui] Service restart timeout while waiting for reconnect");
+    if (restartBtn) restartBtn.disabled = false;
     return;
   }
 
-  setDashMessage("Service restart requested. Reconnecting...", true);
-  clearInterval(refreshTimer);
-  refreshTimer = null;
-  window.setTimeout(() => {
-    window.location.reload();
-  }, 2500);
+  restartInProgress = false;
+  suppressAutoLogout = false;
+  setRestartBanner(false);
+  await loadDashboard();
+  setServiceIndicator("Online", "ok");
+  setDashMessage("Service restarted successfully", true);
+  appendLocalLogLine("[webui] Service restarted successfully");
+  refreshTimer = setInterval(loadDashboard, 3000);
+  if (isDashboardActive()) {
+    loadSystemLog();
+  }
+  if (restartBtn) restartBtn.disabled = false;
 }
 
 async function loadDashboard() {
   const data = await apiGet("/api/status");
   if (!data) {
+    if (restartInProgress) {
+      setServiceIndicator("Restarting...", "neutral");
+      return;
+    }
     setServiceIndicator("Unavailable", "bad");
     return;
   }
+
+  const serviceState = readServiceState(data);
+  if (serviceState === "restarting") {
+    restartInProgress = true;
+    suppressAutoLogout = true;
+    setServiceIndicator("Restarting...", "neutral");
+    setRestartBanner(true, "Service is restarting. Waiting for online state...");
+    renderHealth(data.health || {});
+    renderContainers(data.containers || []);
+    renderImages(data.images || []);
+    $("whoami").textContent = data.session && data.session.login ? `User: ${data.session.login}` : "";
+    return;
+  }
+
+  if (restartInProgress) {
+    restartInProgress = false;
+  }
+  suppressAutoLogout = false;
+  setRestartBanner(false);
+
   setServiceIndicator("Online", "ok");
   renderHealth(data.health || {});
   renderContainers(data.containers || []);
@@ -293,6 +412,10 @@ async function loadSystemLog() {
   const lines = 400;
   const data = await apiGet(`/api/system-log?lines=${lines}`);
   if (!data) {
+    if (restartInProgress) {
+      setLogMeta("Service restarting... reconnecting log stream", true);
+      return;
+    }
     setLogMeta("Log endpoint unavailable", false);
     return;
   }

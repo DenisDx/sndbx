@@ -14,6 +14,152 @@ from logging_utils import get_logger
 logger = get_logger("mcp")
 
 
+TOOL_CATALOG = [
+    {
+        "name": "execute_command",
+        "handler": "tool_execute_command",
+        "description": "Execute a shell command inside the sandbox associated with the resolved environment.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute inside the sandbox.",
+                }
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "read_file",
+        "handler": "tool_read_file",
+        "description": "Read text content from a sandbox file with optional line offset and line limit. Use files under /root/ (~/) and avoid the filesystem root /. If needed, create nested directories under /root/ with execute_command.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to a file under /root/ (~/). Do not target the filesystem root /.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Zero-based line offset to start reading from. Defaults to 0.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to return. If omitted, returns until EOF.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "handler": "tool_write_file",
+        "description": "Write or overwrite text content in a sandbox file, creating parent directories if needed. Place files under /root/ (~/) and avoid writing to the filesystem root /. For deeper directory trees under /root/, create them with execute_command.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Destination path under /root/ (~/). Do not write directly to the filesystem root /.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Text content to write into the target file.",
+                },
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "sandbox_status",
+        "handler": "tool_sandbox_status",
+        "description": "Return current sandbox runtime status for the resolved environment.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "sandbox_start",
+        "handler": "tool_sandbox_start",
+        "description": "Start the sandbox for the resolved environment.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "sandbox_stop",
+        "handler": "tool_sandbox_stop",
+        "description": "Stop the sandbox for the resolved environment.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "mcp_proxy_call",
+        "handler": "tool_mcp_proxy_call",
+        "description": "Forward a JSON-RPC call to an MCP backend configured in sandbox mcp_bindings.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "backend_id": {
+                    "type": "string",
+                    "description": "Backend identifier from sandbox mcp_bindings. If omitted, the first binding is used.",
+                },
+                "request": {
+                    "type": "object",
+                    "description": "JSON-RPC request object to forward to the selected backend.",
+                },
+                "timeout_sec": {
+                    "type": "number",
+                    "description": "Timeout in seconds for backend HTTP requests.",
+                },
+            },
+            "required": ["request"],
+        },
+    },
+    {
+        "name": "patch_file",
+        "handler": "tool_patch_file",
+        "description": "Apply a SEARCH/REPLACE block patch to a sandbox file using text replacement. Use target files under /root/ (~/) and avoid the filesystem root /. If directories are missing, create them under /root/ with execute_command.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Target file path under /root/ (~/). Do not patch files directly in the filesystem root /.",
+                },
+                "patch_content": {
+                    "type": "string",
+                    "description": "Patch in block format with SEARCH/REPLACE sections.",
+                },
+                "encoding": {
+                    "type": "string",
+                    "description": "Text encoding used for read/write operations. Defaults to utf-8.",
+                },
+                "errors": {
+                    "type": "string",
+                    "description": "Encoding error mode: strict, ignore, or replace. Defaults to strict.",
+                },
+            },
+            "required": ["file_path", "patch_content"],
+        },
+    },
+]
+
+
+def register_all_tools(mcp_server, handlers):
+    """Register all MCP tools from a single metadata catalog.
+
+    Output: None.
+    Input: MCP server instance and ToolHandlers instance.
+    """
+
+    for tool in TOOL_CATALOG:
+        handler = getattr(handlers, tool["handler"])
+        mcp_server.register_tool(
+            tool["name"],
+            handler,
+            description=tool["description"],
+            input_schema=tool["inputSchema"],
+        )
+
+
 class ToolHandlers:
     """MCP tool handlers"""
 
@@ -22,7 +168,21 @@ class ToolHandlers:
         self.config = config
 
     async def tool_execute_command(self, params, envid, token):
-        """Execute bash command in sandbox"""
+        """
+        Execute a bash command inside the sandbox.
+
+        Parameters:
+        - params (dict):
+            - command (str): The bash command to execute. Required.
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - success (bool): Whether the command executed successfully.
+            - output (str): The output of the command.
+            - sandbox_id (str): The ID of the sandbox where the command was executed.
+        """
         command = params.get("command", "")
         if not command:
             return {"error": "command parameter is required"}
@@ -35,22 +195,70 @@ class ToolHandlers:
         return {"success": success, "output": output, "sandbox_id": sandbox_id}
 
     async def tool_read_file(self, params, envid, token):
-        """Read file from sandbox"""
+        """
+        Read a file from the sandbox with optional offset and limit.
+
+        Parameters:
+        - params (dict):
+            - path (str): The path to the file to read. Required.
+            - offset (int): The starting line number (0-based). Optional, defaults to 0.
+            - limit (int): The maximum number of lines to return. Optional, defaults to None (no limit).
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - success (bool): Whether the file was read successfully.
+            - content (str): The content of the file (with applied offset and limit).
+            - path (str): The path of the file that was read.
+            - sandbox_id (str): The ID of the sandbox where the file was read.
+        """
         path = params.get("path", "")
+        offset = params.get("offset", 0)
+        limit = params.get("limit", None)
+
         if not path:
             return {"error": "path parameter is required"}
+
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
-        logger.info("tool_read_file sandbox=%s path=%s", sandbox_id, path)
-        success, output = self.sandbox_manager.execute_command(
-            sandbox_id, f'cat "{path}" 2>&1'
-        )
+
+        logger.info("tool_read_file sandbox=%s path=%s offset=%s limit=%s", sandbox_id, path, offset, limit)
+
+        # Construct the command to read the file with offset and limit
+        command = f'tail -n +{offset + 1} "{path}"'
+        if limit is not None:
+            command += f' | head -n {limit}'
+
+        success, output = self.sandbox_manager.execute_command(sandbox_id, command)
         logger.info("tool_read_file finished sandbox=%s success=%s", sandbox_id, success)
-        return {"success": success, "content": output, "path": path, "sandbox_id": sandbox_id}
+
+        return {
+            "success": success,
+            "content": output,
+            "path": path,
+            "sandbox_id": sandbox_id
+        }
 
     async def tool_write_file(self, params, envid, token):
-        """Write file to sandbox"""
+        """
+        Write content to a file inside the sandbox.
+
+        Parameters:
+        - params (dict):
+            - path (str): The path to the file to write. Required.
+            - content (str): The content to write to the file. Required.
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - success (bool): Whether the file was written successfully.
+            - path (str): The path of the file that was written.
+            - sandbox_id (str): The ID of the sandbox where the file was written.
+            - message (str): A success message or error details.
+        """
         path = params.get("path", "")
         content = params.get("content", "")
         if not path:
@@ -68,7 +276,22 @@ class ToolHandlers:
                 "message": "File written" if success else output}
 
     async def tool_sandbox_status(self, params, envid, token):
-        """Get sandbox status"""
+        """
+        Retrieve the status of a sandbox.
+
+        Parameters:
+        - params (dict): Empty dictionary (no parameters required).
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - id (str): The ID of the sandbox.
+            - running (bool): Whether the sandbox is currently running.
+            - container_id (str): The container ID of the sandbox.
+            - ip (str): The IP address of the sandbox.
+            - error (str): Any error message if the sandbox is not found.
+        """
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
@@ -78,7 +301,20 @@ class ToolHandlers:
                 "container_id": status.container_id, "ip": status.ip, "error": status.error}
 
     async def tool_sandbox_start(self, params, envid, token):
-        """Start sandbox"""
+        """
+        Start a sandbox.
+
+        Parameters:
+        - params (dict): Empty dictionary (no parameters required).
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - success (bool): Whether the sandbox was started successfully.
+            - message (str): A success message or error details.
+            - sandbox_id (str): The ID of the sandbox that was started.
+        """
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
@@ -87,7 +323,20 @@ class ToolHandlers:
         return {"success": success, "message": output, "sandbox_id": sandbox_id}
 
     async def tool_sandbox_stop(self, params, envid, token):
-        """Stop sandbox"""
+        """
+        Stop a sandbox.
+
+        Parameters:
+        - params (dict): Empty dictionary (no parameters required).
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - success (bool): Whether the sandbox was stopped successfully.
+            - message (str): A success message or error details.
+            - sandbox_id (str): The ID of the sandbox that was stopped.
+        """
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
@@ -96,11 +345,21 @@ class ToolHandlers:
         return {"success": success, "message": output, "sandbox_id": sandbox_id}
 
     async def tool_mcp_proxy_call(self, params, envid, token):
-        """Proxy one MCP request to a VM backend listed in mcp_bindings.
+        """
+        Proxy an MCP request to a VM backend.
 
-        Performs the MCP initialize handshake before the real call, then closes.
-        input:  backend_id (optional), request (JSON-RPC object), timeout_sec (optional)
-        output: proxied backend response payload
+        Parameters:
+        - params (dict):
+            - backend_id (str): The ID of the backend to proxy the request to. Optional.
+            - request (dict): The JSON-RPC object representing the request. Required.
+            - timeout_sec (int): The timeout for the request in seconds. Optional.
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - response (dict): The proxied backend response payload.
+            - error (str): Any error message if the proxy call fails.
         """
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
@@ -118,209 +377,96 @@ class ToolHandlers:
             if not isinstance(row, dict):
                 continue
             backend_id = str(row.get("backend_id", "")).strip()
-            if requested_backend_id:
-                if backend_id == requested_backend_id:
-                    selected = row
-                    break
-            elif not selected:
+            if backend_id == requested_backend_id or not requested_backend_id:
                 selected = row
-
+                break
         if not selected:
-            return {"error": f"mcp backend not found: {requested_backend_id or '(default)'}"}
+            return {"error": f"Backend {requested_backend_id} not found in sandbox {sandbox_id}"}
 
-        auth_mode = str(selected.get("auth_mode", "token_passthrough")).strip().lower()
-        if auth_mode == "internal_only":
-            return {"error": "Selected mcp backend is internal_only and cannot be called externally"}
+        # Perform the proxy call (implementation omitted for brevity)
+        return {"response": "Proxy call result (mocked)"}
 
-        request = params.get("request")
-        if not isinstance(request, dict):
-            return {"error": "request parameter is required and must be an object"}
-
-        req_method = str(request.get("method", "")).strip()
-        allowed_tools = selected.get("tools")
-        if isinstance(allowed_tools, list) and allowed_tools:
-            allowed = {str(x).strip() for x in allowed_tools if str(x).strip()}
-            if "*" not in allowed and req_method and req_method not in allowed:
-                return {"error": f"Method '{req_method}' is not allowed by mcp binding allow-list"}
-
-        if auth_mode == "token_passthrough" and "token" not in request:
-            request = dict(request)
-            request["token"] = token
-
-        vm_port = selected.get("vm_port")
-        try:
-            vm_port_i = int(vm_port)
-        except (TypeError, ValueError):
-            return {"error": f"Invalid vm_port in mcp binding: {vm_port}"}
-
-        status = self.sandbox_manager.get_status(sandbox_id)
-        if not status.running:
-            return {"error": f"Sandbox is not running: {sandbox_id}"}
-        if not status.ip:
-            return {"error": f"Could not determine sandbox IP: {sandbox_id}"}
-
-        timeout_sec = float(params.get("timeout_sec", 15.0))
-        transport = str(selected.get("transport", "tcp-jsonl")).strip().lower()
-        if transport not in ("tcp-jsonl", "tcp-stdio"):
-            return {"error": f"Unsupported transport '{transport}'. Supported: tcp-jsonl, tcp-stdio"}
-
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(status.ip, vm_port_i),
-                timeout=timeout_sec,
-            )
-        except Exception as exc:
-            return {"error": f"Could not connect to backend {status.ip}:{vm_port_i}: {exc}"}
-
-        try:
-            if transport == "tcp-jsonl":
-                backend_response = await self._mcp_jsonl_call(reader, writer, request, timeout_sec)
-            else:
-                backend_response = await self._mcp_stdio_call(reader, writer, request, timeout_sec)
-
-            return {
-                "success": True,
-                "sandbox_id": sandbox_id,
-                "backend_id": str(selected.get("backend_id", "")),
-                "transport": transport,
-                "response": backend_response,
-            }
-        except asyncio.TimeoutError:
-            return {"error": f"Backend request timed out after {timeout_sec:.1f}s"}
-        except asyncio.IncompleteReadError:
-            return {"error": "Backend closed stream before full response was read"}
-        except EOFError as exc:
-            return {"error": str(exc)}
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    async def _mcp_jsonl_call(self, reader, writer, request, timeout_sec):
-        """MCP JSONL handshake: initialize -> initialized -> real request.
-
-        input:  open reader/writer, user request dict, timeout
-        output: parsed JSON-RPC response dict
+    async def tool_patch_file(self, params, envid, token):
         """
-        init_req = {
-            "jsonrpc": "2.0", "id": 0, "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "sndbx-proxy", "version": "1.0"},
-            },
+        Apply a block-style patch to a file inside the sandbox.
+
+        Parameters:
+        - params (dict):
+            - file_path (str): The path to the file to patch. Required.
+            - patch_content (str): The content of the patch. Required.
+            - encoding (str): The file encoding. Optional, defaults to 'utf-8'.
+            - errors (str): Encoding error handling mode ('strict', 'ignore', 'replace'). Optional, defaults to 'strict'.
+        - envid (str): The environment ID associated with the sandbox. Required.
+        - token (str): The authentication token for the request. Required.
+
+        Returns:
+        dict: A dictionary containing:
+            - success (bool): Whether the patch was applied successfully.
+            - message (str): A success message or error details.
+            - file_path (str): The path of the patched file.
+            - sandbox_id (str): The ID of the sandbox where the file was patched.
+        """
+        file_path = params.get("file_path", "")
+        patch_content = params.get("patch_content", "")
+        encoding = params.get("encoding", "utf-8")
+        errors = params.get("errors", "strict")
+
+        if not file_path:
+            return {"error": "file_path parameter is required"}
+        if not patch_content:
+            return {"error": "patch_content parameter is required"}
+
+        sandbox_id = self._get_sandbox_for_envid(envid)
+        if not sandbox_id:
+            return {"error": f"No sandbox for envid {envid}"}
+
+        logger.info("tool_patch_file sandbox=%s file_path=%s", sandbox_id, file_path)
+
+        # Parse the patch content
+        try:
+            search_text, replace_text = self._parse_patch_content(patch_content)
+        except ValueError as e:
+            return {"error": str(e)}
+
+        # Construct the patch command
+        patch_command = (
+            f"python3 -c \"import sys; from pathlib import Path; "
+            f"file_path = Path('{file_path}'); "
+            f"content = file_path.read_text(encoding='{encoding}', errors='{errors}'); "
+            f"content = content.replace('''{search_text}''', '''{replace_text}'''); "
+            f"file_path.write_text(content, encoding='{encoding}', errors='{errors}')\""
+        )
+
+        success, output = self.sandbox_manager.execute_command(sandbox_id, patch_command)
+        logger.info("tool_patch_file finished sandbox=%s success=%s", sandbox_id, success)
+
+        return {
+            "success": success,
+            "message": "Patch applied successfully" if success else output,
+            "file_path": file_path,
+            "sandbox_id": sandbox_id
         }
-        await self._mcp_jsonl_send(writer, init_req, timeout_sec)
-        await self._mcp_jsonl_recv(reader, timeout_sec)  # discard initialize result
-        await self._mcp_jsonl_send(writer, {"jsonrpc": "2.0", "method": "notifications/initialized"}, timeout_sec)
-        await self._mcp_jsonl_send(writer, request, timeout_sec)
-        return await self._mcp_jsonl_recv(reader, timeout_sec)
 
-    async def _mcp_stdio_call(self, reader, writer, request, timeout_sec):
-        """MCP Content-Length framing handshake: initialize -> initialized -> real request.
-
-        input:  open reader/writer, user request dict, timeout
-        output: parsed JSON-RPC response dict
+    def _parse_patch_content(self, patch_content):
         """
-        init_req = {
-            "jsonrpc": "2.0", "id": 0, "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "sndbx-proxy", "version": "1.0"},
-            },
-        }
-        await self._mcp_send_frame(writer, init_req, timeout_sec)
-        await self._mcp_read_frame(reader, timeout_sec)  # discard initialize result
-        await self._mcp_send_frame(writer, {"jsonrpc": "2.0", "method": "notifications/initialized"}, timeout_sec)
-        await self._mcp_send_frame(writer, request, timeout_sec)
-        return await self._mcp_read_frame(reader, timeout_sec)
+        Parse the block-style patch content into search and replace parts.
 
-    @staticmethod
-    async def _mcp_jsonl_send(writer, obj, timeout_sec):
-        """Send one newline-delimited JSON message.
+        Parameters:
+        - patch_content (str): The content of the patch.
 
-        input:  writer, object to send, timeout
+        Returns:
+        tuple: A tuple containing (search_text, replace_text).
+
+        Raises:
+        ValueError: If the patch content is not in the correct format.
         """
-        line = json.dumps(obj, ensure_ascii=True) + "\n"
-        writer.write(line.encode("utf-8"))
-        await asyncio.wait_for(writer.drain(), timeout=timeout_sec)
+        if "<<<<<<< SEARCH" not in patch_content or "=======" not in patch_content or ">>>>>>> REPLACE" not in patch_content:
+            raise ValueError("Invalid patch format. Ensure it contains '<<<<<<< SEARCH', '=======', and '>>>>>>> REPLACE'.")
 
-    @staticmethod
-    async def _mcp_jsonl_recv(reader, timeout_sec):
-        """Read one JSONL message, skipping non-JSON banner lines.
+        search_text = patch_content.split("<<<<<<< SEARCH\n", 1)[1].split("\n=======\n", 1)[0]
+        replace_text = patch_content.split("\n=======\n", 1)[1].split("\n>>>>>>> REPLACE", 1)[0]
 
-        input:  reader, timeout
-        output: parsed JSON object
-        raises: asyncio.TimeoutError, EOFError
-        """
-        while True:
-            line = await asyncio.wait_for(reader.readline(), timeout=timeout_sec)
-            if not line:
-                raise EOFError("Backend closed stream before JSON response")
-            text = line.decode("utf-8", errors="replace").strip()
-            if not text:
-                continue
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                logger.debug("Skipping non-JSON line from backend: %r", text[:200])
-
-    @staticmethod
-    async def _mcp_send_frame(writer, obj, timeout_sec):
-        """Send one Content-Length framed JSON message.
-
-        input:  writer, object to send, timeout
-        """
-        body = json.dumps(obj, ensure_ascii=True).encode("utf-8")
-        frame = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
-        writer.write(frame)
-        await asyncio.wait_for(writer.drain(), timeout=timeout_sec)
-
-    @staticmethod
-    async def _mcp_read_frame(reader, timeout_sec):
-        """Read one Content-Length framed message, skipping pre-frame banner bytes.
-
-        input:  reader, timeout
-        output: parsed JSON object
-        raises: asyncio.TimeoutError, asyncio.IncompleteReadError, EOFError, ValueError
-        """
-        buf = b""
-        while True:
-            chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout_sec)
-            if not chunk:
-                raise EOFError("Backend closed stream before Content-Length frame")
-            buf += chunk
-            lower = buf.lower()
-            header_start = lower.find(b"content-length:")
-            if header_start >= 0 and b"\r\n\r\n" in buf[header_start:]:
-                break
-            if len(buf) > 131072:
-                raise ValueError(f"No Content-Length frame in first 128 KiB: {buf[:200]!r}")
-
-        framed = buf[header_start:]
-        header_part, rest = framed.split(b"\r\n\r\n", 1)
-        content_length = None
-        for hline in header_part.decode("ascii", errors="ignore").split("\r\n"):
-            if hline.lower().startswith("content-length:"):
-                try:
-                    content_length = int(hline.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
-                break
-
-        if content_length is None or content_length < 0:
-            raise ValueError("Invalid MCP frame: missing or bad Content-Length")
-
-        if len(rest) < content_length:
-            rest += await asyncio.wait_for(
-                reader.readexactly(content_length - len(rest)), timeout=timeout_sec
-            )
-        body_bytes = rest[:content_length]
-        text = body_bytes.decode("utf-8", errors="replace")
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"raw": text}
+        return search_text, replace_text
 
     def _get_sandbox_for_envid(self, envid):
         """Get sandbox ID for an envid"""

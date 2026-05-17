@@ -374,6 +374,23 @@ class WebUIServer:
         self.app = self._create_app()
         self._server: Optional[uvicorn.Server] = None
         self.started_event = asyncio.Event()
+        self._restart_requested_at_monotonic: float = 0.0
+        self._restart_state_ttl_sec: float = 120.0
+
+    def _mark_restarting(self) -> None:
+        """Mark service state as restarting for status API consumers."""
+        self._restart_requested_at_monotonic = asyncio.get_running_loop().time()
+
+    def _service_state(self) -> str:
+        """Return current service state for Web UI polling."""
+        ts = float(self._restart_requested_at_monotonic or 0.0)
+        if ts <= 0.0:
+            return "online"
+
+        now = asyncio.get_running_loop().time()
+        if (now - ts) <= self._restart_state_ttl_sec:
+            return "restarting"
+        return "online"
 
     def _find_user(self, login: str, password: str) -> Optional[Dict[str, Any]]:
         """Return user dict if credentials match."""
@@ -542,10 +559,37 @@ class WebUIServer:
         return ok
 
     async def _restart_service_soon(self, delay_seconds: float = 0.4) -> None:
-        """Terminate current process after response so systemd can restart service."""
+        """Restart service via systemd, fallback to local SIGTERM shutdown.
+
+        GUI restart should match operator manual command behavior:
+        `systemctl --user restart sndbx`.
+        """
+
         await asyncio.sleep(max(0.05, float(delay_seconds or 0.0)))
-        os.environ["SNDBX_STOP_REASON"] = "restart requested from Web UI"
+
+        unit_name = os.environ.get("SNDBX_SYSTEMD_UNIT", "sndbx")
+        restart_cmd = ["systemctl", "--user", "restart", unit_name]
+
+        try:
+            subprocess.Popen(
+                restart_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info("Requested service restart via systemd: %s", " ".join(restart_cmd))
+            return
+        except Exception as exc:
+            logger.warning("Systemd restart request failed, falling back to SIGTERM restart: %s", exc)
+
+        os.environ["SNDBX_STOP_REASON"] = "restart requested from Web UI (SIGTERM fallback)"
         os.kill(os.getpid(), signal.SIGTERM)
+
+        # If graceful shutdown stalls (for example due to stuck tasks), ensure
+        # process termination for a clean restart path.
+        await asyncio.sleep(3.0)
+        logger.warning("Restart fallback: forcing process exit after SIGTERM grace timeout")
+        os._exit(0)
 
     def _repair_kata_runtime(self) -> Dict[str, Any]:
         """Try to register Kata runtime in Docker daemon using non-interactive sudo."""
@@ -930,6 +974,7 @@ class WebUIServer:
         @app.get("/api/status")
         async def status_endpoint(session: Dict[str, Any] = Depends(self._require_session)):
             return {
+                "service_state": self._service_state(),
                 "health": self._health_checks(),
                 "containers": self._containers_view(),
                 "images": self.sandbox_manager.list_local_images(),
@@ -1016,6 +1061,7 @@ class WebUIServer:
 
         @app.post("/api/service/restart")
         async def service_restart(session: Dict[str, Any] = Depends(self._require_session)):
+            self._mark_restarting()
             asyncio.create_task(self._restart_service_soon())
             return {"ok": True, "message": "Service restart scheduled"}
 

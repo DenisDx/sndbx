@@ -47,6 +47,39 @@
   }
   nav button:hover, nav button.active { border-color: var(--accent); color: var(--accent); }
 
+  #restart-banner {
+    display: none;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    padding: 10px 20px;
+    border-bottom: 1px solid #6a4f17;
+    background: linear-gradient(90deg, rgba(240, 165, 0, 0.22), rgba(240, 165, 0, 0.12));
+    color: #ffd98a;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  #restart-banner.active {
+    display: block;
+  }
+
+  #restart-banner .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 8px;
+    border-radius: 50%;
+    background: #ffd98a;
+    animation: restart-pulse 1.1s ease-in-out infinite;
+  }
+
+  @keyframes restart-pulse {
+    0% { opacity: 0.25; transform: scale(0.9); }
+    50% { opacity: 1; transform: scale(1.12); }
+    100% { opacity: 0.25; transform: scale(0.9); }
+  }
+
   .page { display: none; padding: 20px; min-height: 0; }
   .page.active { display: block; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
@@ -274,6 +307,11 @@
       <span id="whoami" class="muted"></span>
       <button id="logoff-btn">Log off</button>
     </nav>
+
+    <div id="restart-banner" role="status" aria-live="polite">
+      <span class="dot"></span>
+      <span id="restart-banner-text">Service is restarting...</span>
+    </div>
 
     <div id="page-dashboard" class="page active">
       <div class="grid-3">
