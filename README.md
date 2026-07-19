@@ -566,6 +566,7 @@ How it works:
 - If `sandboxes.items.<sandbox_id>.image` points to `<image_id>` and `images/<image_id>/Dockerfile` exists, sndbx can build the image locally.
 - Auto-build is triggered only when sandbox creation is needed and the Docker image is missing.
 - Existing containers keep normal start/stop behavior (no forced rebuild on startup).
+- Set `configure_apt_mirror: false` on images that must retain their native package sources, such as Debian-based images. The default remains `true` for backward compatibility.
 
 Lifecycle hook (`app.py`):
 - If `images/<image_id>/app.py` exists, sndbx executes it inside container as:
@@ -597,7 +598,7 @@ Web UI dashboard includes a "Local images" panel with Build/Rebuild/Update butto
 
 **Root cause**: The default `archive.ubuntu.com` repository may be throttled or blocked on your network (commonly observed in Asia and some corporate environments). Network traffic is routed through the Kata VM's virtual NIC with NAT, so the bottleneck is the repository connection speed, not virtiofs or disk I/O.
 
-**Fix applied automatically**: sndbx configures `mirrors.aliyun.com` as the apt mirror in every newly created sandbox (`/etc/apt/sources.list` is rewritten at container creation time). This brings `apt-get update` from ~2.5 minutes down to ~11 seconds and `apt install python3` from several minutes to ~20 seconds on affected hosts.
+**Fix applied automatically**: by default, sndbx configures `mirrors.aliyun.com` as the apt mirror in newly created sandboxes (`/etc/apt/sources.list` is rewritten at container creation time). This brings `apt-get update` from ~2.5 minutes down to ~11 seconds and `apt install python3` from several minutes to ~20 seconds on affected hosts. Set `configure_apt_mirror: false` in a sandbox config when the image is not Ubuntu Jammy or must retain its native package sources.
 
 **For existing sandboxes** (already created before this fix was applied), reconfigure manually:
 

@@ -38,6 +38,9 @@ shared/
 sessions/
 memory/
 
+# Optional private local images
+images/langvm/
+
 # Workspace/editor settings
 .vscode/
 .idea/

@@ -547,9 +547,10 @@ pkill -x sshd || true
             logger.error(f"Failed to create sandbox {sandbox_id}: {output}")
 
         if success:
-            mirror_ok, mirror_msg = self.configure_apt_mirror(sandbox_id)
-            if not mirror_ok:
-                logger.warning("apt mirror config failed for sandbox '%s': %s", sandbox_id, mirror_msg)
+            if sandbox_cfg.get('configure_apt_mirror', True):
+                mirror_ok, mirror_msg = self.configure_apt_mirror(sandbox_id)
+                if not mirror_ok:
+                    logger.warning("apt mirror config failed for sandbox '%s': %s", sandbox_id, mirror_msg)
 
             hook_ok, hook_msg = self._run_image_hook(sandbox_id, sandbox_cfg, hook_name='on_system_start')
             if not hook_ok:
