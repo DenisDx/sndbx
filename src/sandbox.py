@@ -5,7 +5,12 @@ Manages lifecycle of Docker containers with Kata runtime
 
 import subprocess
 import json
+import re
 import os
+import socket
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -128,68 +133,107 @@ class DockerSandboxManager:
         logger.info("Building local image '%s' from images/%s", image_ref, local_id)
         return self._build_local_image(local_id, image_ref, no_cache=False)
 
-    def _shared_mount_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
-        """Build docker -v args from shared_directories and create host paths.
-
-        input: sandbox id and sandbox config
-        output: flat docker run argument list
-        """
+    def _preflight_shared_mounts(
+        self, sandbox_id: str, sandbox_cfg: Dict[str, Any]
+    ) -> tuple[bool, List[str], List[Dict[str, Any]], str]:
+        """Validate shared mounts and return Docker arguments with redacted metadata."""
         args: List[str] = []
+        resolved: List[Dict[str, Any]] = []
         rows = sandbox_cfg.get('shared_directories', [])
         if not isinstance(rows, list):
-            return args
+            return False, args, resolved, "shared_directories must be a list"
 
-        for row in rows:
+        for index, row in enumerate(rows):
             if not isinstance(row, dict):
-                continue
+                return False, args, resolved, f"shared_directories[{index}] must be an object"
             host_path = str(row.get('host_path', '')).strip()
             guest_path = str(row.get('guest_path', '')).strip()
-            mount_type = str(row.get('mount_type', '')).strip().lower()
+            source_type = str(row.get('source_type') or row.get('mount_type') or '').strip().lower()
             permission = str(row.get('permission', 'rw')).strip().lower()
             host_mode = str(row.get('host_mode', '')).strip()
+            required = bool(row.get('required', True))
+            create_if_missing = bool(row.get('create_if_missing', False))
             mode = 'ro' if permission == 'ro' else 'rw'
 
             if not host_path or not guest_path:
-                continue
+                return False, args, resolved, f"shared_directories[{index}] requires host_path and guest_path"
+            if not guest_path.startswith('/'):
+                return False, args, resolved, f"shared_directories[{index}] guest_path must be absolute"
+            if permission not in {'ro', 'rw'}:
+                return False, args, resolved, f"shared_directories[{index}] permission must be ro or rw"
+            if source_type == 'dir':
+                source_type = 'directory'
+            if source_type not in {'file', 'directory'}:
+                return False, args, resolved, (
+                    f"shared_directories[{index}] source_type must be file or directory"
+                )
+            if create_if_missing and (source_type != 'directory' or permission != 'rw'):
+                return False, args, resolved, (
+                    f"shared_directories[{index}] create_if_missing requires a writable directory"
+                )
 
             host = Path(host_path)
             if not host.is_absolute():
                 host = (self.root_dir / host).resolve()
 
-            # If mount target looks like a file, ensure parent + file; otherwise ensure dir.
-            guest_name = Path(guest_path).name
-            # Prefer explicit mount_type from config. Fallback to conservative suffix-based heuristic.
-            if mount_type == 'file':
-                is_file_mount = True
-            elif mount_type == 'dir':
-                is_file_mount = False
-            else:
-                is_file_mount = bool(Path(guest_name).suffix and not guest_name.startswith('.'))
             try:
-                if is_file_mount:
-                    host.parent.mkdir(parents=True, exist_ok=True)
-                    host.touch(exist_ok=True)
-                else:
-                    if host.exists() and host.is_file():
-                        logger.warning(
-                            "Mount path '%s' is a file but directory is required; replacing with directory",
-                            host,
-                        )
-                        host.unlink()
+                if not host.exists() and create_if_missing:
                     host.mkdir(parents=True, exist_ok=True)
-                    # Apply host_mode permissions if specified
-                    if host_mode:
-                        try:
-                            import os
-                            os.chmod(host, int(host_mode, 8))
-                        except (ValueError, OSError) as exc:
-                            logger.warning("Could not set mode %s on %s: %s", host_mode, host, exc)
+                if not host.exists():
+                    if required:
+                        return False, args, resolved, f"required mount source is missing: {host}"
+                    continue
+                matches_type = host.is_file() if source_type == 'file' else host.is_dir()
+                if not matches_type:
+                    return False, args, resolved, (
+                        f"mount source type mismatch for {host}: expected {source_type}"
+                    )
+                if host_mode:
+                    os.chmod(host, int(host_mode, 8))
             except Exception as exc:
-                logger.warning("Could not prepare host mount '%s' for sandbox '%s': %s", host, sandbox_id, exc)
-                continue
+                return False, args, resolved, (
+                    f"could not prepare mount source for sandbox {sandbox_id}: {host}: {exc}"
+                )
 
             args.extend(['-v', f'{host}:{guest_path}:{mode}'])
+            resolved.append({
+                'guest_path': guest_path,
+                'source_type': source_type,
+                'permission': permission,
+                'required': required,
+            })
 
+        return True, args, resolved, ""
+
+    def _managed_volume_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
+        """Build Docker-managed volume mounts that never expose host paths.
+
+        Args:
+            sandbox_id: configured sandbox identifier used for diagnostics.
+            sandbox_cfg: sandbox configuration containing ``managed_volumes``.
+
+        Returns:
+            Flat Docker ``-v`` arguments for validated named volumes.
+        """
+        args: List[str] = []
+        rows = sandbox_cfg.get('managed_volumes', [])
+        if not isinstance(rows, list):
+            return args
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get('name', '')).strip()
+            guest_path = str(row.get('guest_path', '')).strip()
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name) or not guest_path.startswith('/'):
+                logger.warning("Invalid managed volume for sandbox '%s'", sandbox_id)
+                continue
+            exists, _ = self._run_docker_cmd(['volume', 'inspect', name])
+            if not exists:
+                created, output = self._run_docker_cmd(['volume', 'create', name])
+                if not created:
+                    logger.warning("Could not create managed volume '%s' for sandbox '%s': %s", name, sandbox_id, output)
+                    continue
+            args.extend(['-v', f'{name}:{guest_path}:rw'])
         return args
 
     def _port_binding_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
@@ -236,7 +280,179 @@ class DockerSandboxManager:
 
         return args
 
-    def _run_image_hook(self, sandbox_id: str, sandbox_cfg: Dict[str, Any], hook_name: str = 'on_system_start') -> tuple[bool, str]:
+    def _runtime_contract(self, sandbox_cfg: Dict[str, Any]) -> tuple[bool, Dict[str, Any], str]:
+        """Return the validated optional runtime contract for one sandbox."""
+        contract = sandbox_cfg.get('runtime_contract')
+        if contract is None:
+            return True, {}, ""
+        if not isinstance(contract, dict):
+            return False, {}, "runtime_contract must be an object"
+        if contract.get('version') != 1:
+            return False, {}, "runtime_contract.version must be 1"
+        return True, contract, ""
+
+    def _as_bool(self, value: Any) -> bool:
+        """Convert supported configuration values to a boolean result."""
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def _runtime_environment_args(
+        self, sandbox_cfg: Dict[str, Any]
+    ) -> tuple[bool, List[str], List[str], List[Dict[str, Any]], str]:
+        """Build runtime environment, host aliases, and active companion probes."""
+        contract_ok, contract, contract_error = self._runtime_contract(sandbox_cfg)
+        if not contract_ok:
+            return False, [], [], [], contract_error
+
+        environment = contract.get('environment', {})
+        if not isinstance(environment, dict):
+            return False, [], [], [], "runtime_contract.environment must be an object"
+        values: Dict[str, str] = {}
+        for name, value in environment.items():
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Z_][A-Z0-9_]*', name):
+                return False, [], [], [], "runtime_contract.environment has an invalid variable name"
+            values[name] = str(value)
+
+        companions = contract.get('companion_services', [])
+        if not isinstance(companions, list):
+            return False, [], [], [], "runtime_contract.companion_services must be a list"
+
+        guest_provides_postgres = self._as_bool(values.get('SNDBX_PROVIDES_POSTGRES', False))
+        host_aliases: List[str] = []
+        active_readiness: List[Dict[str, Any]] = []
+        for index, companion in enumerate(companions):
+            if not isinstance(companion, dict):
+                return False, [], [], [], f"companion_services[{index}] must be an object"
+            name = str(companion.get('name', '')).strip()
+            host = str(companion.get('host', '')).strip()
+            try:
+                port = int(companion.get('port'))
+            except (TypeError, ValueError):
+                return False, [], [], [], f"companion_services[{index}] port must be an integer"
+            inject = companion.get('inject', {})
+            if not re.fullmatch(r'[a-z][a-z0-9_-]*', name) or not host or not (1 <= port <= 65535):
+                return False, [], [], [], f"companion_services[{index}] has invalid name, host, or port"
+            if name == 'postgres' and guest_provides_postgres:
+                continue
+            if not isinstance(inject, dict):
+                return False, [], [], [], f"companion_services[{index}].inject must be an object"
+            host_env = str(inject.get('host_env', '')).strip()
+            port_env = str(inject.get('port_env', '')).strip()
+            if not re.fullmatch(r'[A-Z_][A-Z0-9_]*', host_env) or not re.fullmatch(r'[A-Z_][A-Z0-9_]*', port_env):
+                return False, [], [], [], f"companion_services[{index}].inject requires host_env and port_env"
+            if host_env in values or port_env in values:
+                return False, [], [], [], f"companion_services[{index}] conflicts with runtime environment"
+            values[host_env] = host
+            values[port_env] = str(port)
+            if host == 'host.docker.internal' and host not in host_aliases:
+                host_aliases.extend(['--add-host', 'host.docker.internal:host-gateway'])
+            readiness = companion.get('readiness')
+            if readiness is not None:
+                if not isinstance(readiness, dict):
+                    return False, [], [], [], f"companion_services[{index}].readiness must be an object"
+                active_readiness.append(readiness)
+
+        environment_args: List[str] = []
+        for name, value in values.items():
+            environment_args.extend(['-e', f'{name}={value}'])
+        return True, environment_args, host_aliases, active_readiness, ""
+
+    def _validate_readiness_probe(self, probe: Dict[str, Any]) -> tuple[bool, str]:
+        """Validate the shape of one HTTP, TCP, or command readiness probe."""
+        probe_type = str(probe.get('type', '')).strip().lower()
+        if probe_type == 'http':
+            if not str(probe.get('url', '')).startswith(('http://', 'https://')):
+                return False, "HTTP readiness probe requires an http(s) URL"
+        elif probe_type == 'tcp':
+            try:
+                port = int(probe.get('port'))
+            except (TypeError, ValueError):
+                return False, "TCP readiness probe requires a port"
+            if not str(probe.get('host', '')).strip() or not (1 <= port <= 65535):
+                return False, "TCP readiness probe has invalid host or port"
+        elif probe_type == 'command':
+            if not str(probe.get('command', '')).strip():
+                return False, "command readiness probe requires a command"
+        else:
+            return False, "readiness probe type must be http, tcp, or command"
+        return True, ""
+
+    def _wait_for_readiness_probe(self, sandbox_id: str, probe: Dict[str, Any]) -> tuple[bool, str]:
+        """Wait for one bounded readiness probe to succeed."""
+        probe_ok, probe_error = self._validate_readiness_probe(probe)
+        if not probe_ok:
+            return False, probe_error
+        attempts = probe.get('attempts', 1)
+        interval_seconds = probe.get('interval_seconds', 1)
+        try:
+            attempts = max(1, int(attempts))
+            interval_seconds = max(0, float(interval_seconds))
+        except (TypeError, ValueError):
+            return False, "readiness probe attempts and interval_seconds must be numeric"
+
+        probe_type = str(probe['type']).lower()
+        last_error = "readiness probe did not succeed"
+        for attempt in range(attempts):
+            try:
+                if probe_type == 'http':
+                    with urllib.request.urlopen(str(probe['url']), timeout=2):
+                        return True, ""
+                elif probe_type == 'tcp':
+                    with socket.create_connection((str(probe['host']), int(probe['port'])), timeout=2):
+                        return True, ""
+                else:
+                    ok, output = self._run_docker_cmd([
+                        'exec', f'sndbx-{sandbox_id}', 'sh', '-c', str(probe['command'])
+                    ], timeout=10)
+                    if ok:
+                        return True, ""
+                    last_error = output.strip() or last_error
+            except (OSError, urllib.error.URLError, ValueError) as exc:
+                last_error = str(exc)
+            if attempt + 1 < attempts:
+                time.sleep(interval_seconds)
+        return False, last_error
+
+    def _validate_runtime_start(
+        self, sandbox_id: str, sandbox_cfg: Dict[str, Any], hook_message: str
+    ) -> tuple[bool, str]:
+        """Verify hook capabilities and readiness for an optional runtime contract."""
+        contract_ok, contract, contract_error = self._runtime_contract(sandbox_cfg)
+        if not contract_ok:
+            return False, contract_error
+        if not contract:
+            return True, ""
+
+        environment = contract.get('environment', {})
+        if contract.get('capability_hook', False):
+            try:
+                capabilities = json.loads(hook_message)
+            except json.JSONDecodeError:
+                return False, "runtime capability hook did not return JSON"
+            expected = self._as_bool(environment.get('SNDBX_PROVIDES_POSTGRES', False))
+            if not isinstance(capabilities, dict) or capabilities.get('provides_postgres') is not expected:
+                return False, "runtime capability hook does not match SNDBX_PROVIDES_POSTGRES"
+
+        environment_ok, _, _, companion_probes, environment_error = self._runtime_environment_args(sandbox_cfg)
+        if not environment_ok:
+            return False, environment_error
+        probes = contract.get('readiness', [])
+        if not isinstance(probes, list):
+            return False, "runtime_contract.readiness must be a list"
+        for probe in [*companion_probes, *probes]:
+            if not isinstance(probe, dict):
+                return False, "runtime readiness probes must be objects"
+            ready, readiness_error = self._wait_for_readiness_probe(sandbox_id, probe)
+            if not ready:
+                return False, f"readiness failed: {readiness_error}"
+        return True, ""
+
+    def _run_image_hook(
+        self,
+        sandbox_id: str,
+        sandbox_cfg: Dict[str, Any],
+        hook_name: str = 'on_system_start',
+        resolved_mounts: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple[bool, str]:
         """Run standardized image hook from /opt/sndbx-image/app.py inside container.
 
         input: sandbox id, sandbox config, hook name
@@ -253,12 +469,18 @@ class DockerSandboxManager:
 
         ctx = {
             'sandbox_id': sandbox_id,
-            'sandbox_cfg': sandbox_cfg,
+            'image_ref': image_ref,
+            'resolved_mounts': resolved_mounts or [],
         }
         ctx_json = json.dumps(ctx, ensure_ascii=True)
 
+        runtime_ok, runtime_environment_args, _, _, runtime_error = self._runtime_environment_args(sandbox_cfg)
+        if not runtime_ok:
+            return False, runtime_error
+
         ok, out = self._run_docker_cmd([
             'exec',
+            *runtime_environment_args,
             '-e', f'SNDBX_HOOK={hook_name}',
             '-e', f'SNDBX_CONTEXT_JSON={ctx_json}',
             f'sndbx-{sandbox_id}',
@@ -464,8 +686,21 @@ pkill -x sshd || true
             '--tmpfs', '/var/lib/apt/lists:rw,exec',
             '--tmpfs', '/var/cache/apt:rw,exec',
         ]
-        shared_mount_args = self._shared_mount_args(sandbox_id, sandbox_cfg)
+        mounts_ok, shared_mount_args, resolved_mounts, mount_error = self._preflight_shared_mounts(
+            sandbox_id, sandbox_cfg
+        )
+        if not mounts_ok:
+            logger.error("Mount preflight failed for sandbox '%s': %s", sandbox_id, mount_error)
+            return False, mount_error
+        managed_volume_args = self._managed_volume_args(sandbox_id, sandbox_cfg)
         port_binding_args = self._port_binding_args(sandbox_id, sandbox_cfg)
+        runtime_ok, runtime_environment_args, runtime_host_args, _, runtime_error = self._runtime_environment_args(
+            sandbox_cfg
+        )
+        if not runtime_ok:
+            logger.error("Runtime contract failed for sandbox '%s': %s", sandbox_id, runtime_error)
+            return False, runtime_error
+        runtime_command = [] if sandbox_cfg.get('runtime_contract') else ['sleep', 'infinity']
 
         base_cmd = [
             'run',
@@ -476,9 +711,12 @@ pkill -x sshd || true
             '--detach',
             *apt_tmpfs_args,
             *shared_mount_args,
+            *managed_volume_args,
             *port_binding_args,
+            *runtime_host_args,
+            *runtime_environment_args,
             image,
-            'sleep', 'infinity'  # Keep container running
+            *runtime_command,
         ]
 
         cmd_with_disk_limit = list(base_cmd)
@@ -493,9 +731,12 @@ pkill -x sshd || true
                 '--storage-opt', f'size={disk_max}',
                 *apt_tmpfs_args,
                 *shared_mount_args,
+                *managed_volume_args,
                 *port_binding_args,
+                *runtime_host_args,
+                *runtime_environment_args,
                 image,
-                'sleep', 'infinity'  # Keep container running
+                *runtime_command,
             ]
 
         launch_cmd = cmd_with_disk_limit
@@ -552,21 +793,44 @@ pkill -x sshd || true
                 if not mirror_ok:
                     logger.warning("apt mirror config failed for sandbox '%s': %s", sandbox_id, mirror_msg)
 
-            hook_ok, hook_msg = self._run_image_hook(sandbox_id, sandbox_cfg, hook_name='on_system_start')
+            hook_ok, hook_msg = self._run_image_hook(
+                sandbox_id, sandbox_cfg, hook_name='on_system_start', resolved_mounts=resolved_mounts
+            )
             if not hook_ok:
+                if sandbox_cfg.get('runtime_contract'):
+                    self._run_docker_cmd(['rm', '-f', f'sndbx-{sandbox_id}'])
+                    return False, f"image hook failed: {hook_msg}"
                 logger.warning("image hook failed for sandbox '%s': %s", sandbox_id, hook_msg)
+            runtime_ok, runtime_error = self._validate_runtime_start(sandbox_id, sandbox_cfg, hook_msg)
+            if not runtime_ok:
+                self._run_docker_cmd(['rm', '-f', f'sndbx-{sandbox_id}'])
+                return False, runtime_error
 
         return success, output
 
     def start_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
-        """Start an existing sandbox container"""
+        """Start a sandbox container, creating it when no container exists."""
+        status = self.get_status(sandbox_id)
+        if status.running:
+            logger.info("Sandbox '%s' is already running", sandbox_id)
+            return True, "already running"
         success, output = self._run_docker_cmd(['start', f'sndbx-{sandbox_id}'])
+        if not success and 'No such container' in output:
+            logger.info("Sandbox '%s' is absent; creating it before start", sandbox_id)
+            return self.create_sandbox(sandbox_id)
         if success:
             logger.info(f"Started sandbox {sandbox_id}")
             sandbox_cfg = self.sandbox_configs.get(sandbox_id, {})
             hook_ok, hook_msg = self._run_image_hook(sandbox_id, sandbox_cfg, hook_name='on_system_start')
             if not hook_ok:
+                if sandbox_cfg.get('runtime_contract'):
+                    self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
+                    return False, f"image hook failed: {hook_msg}"
                 logger.warning("image hook failed on start for sandbox '%s': %s", sandbox_id, hook_msg)
+            runtime_ok, runtime_error = self._validate_runtime_start(sandbox_id, sandbox_cfg, hook_msg)
+            if not runtime_ok:
+                self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
+                return False, runtime_error
         return success, output
 
     def stop_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
