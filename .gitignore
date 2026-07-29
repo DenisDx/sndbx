@@ -40,6 +40,8 @@ memory/
 
 # Optional private local images
 images/langvm/
+images/aibusiness/
+images/clawvm/
 
 # Workspace/editor settings
 .vscode/
