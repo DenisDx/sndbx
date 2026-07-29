@@ -236,6 +236,30 @@ class DockerSandboxManager:
             args.extend(['-v', f'{name}:{guest_path}:rw'])
         return args
 
+    def _tmpfs_args(self, sandbox_cfg: Dict[str, Any]) -> List[str]:
+        """Build Docker tmpfs arguments from absolute configured mount paths."""
+        rows = sandbox_cfg.get('tmpfs', [])
+        if not isinstance(rows, list):
+            return []
+        args: List[str] = []
+        for path in rows:
+            mount = str(path).strip()
+            if not mount.startswith('/') or '\x00' in mount:
+                logger.warning("Ignoring invalid tmpfs mount path: %r", path)
+                continue
+            args.extend(['--tmpfs', mount])
+        return args
+
+    def _shm_size_args(self, sandbox_cfg: Dict[str, Any]) -> List[str]:
+        """Build a validated Docker shared-memory size argument."""
+        size = str(sandbox_cfg.get('shm_size', '')).strip()
+        if not size:
+            return []
+        if not re.fullmatch(r'\d+(?:[kKmMgG](?:[bB])?)?', size):
+            logger.warning("Ignoring invalid shared-memory size: %r", size)
+            return []
+        return ['--shm-size', size]
+
     def _port_binding_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
         """Build docker -p args from sandbox port_bindings config.
 
@@ -693,6 +717,8 @@ pkill -x sshd || true
             logger.error("Mount preflight failed for sandbox '%s': %s", sandbox_id, mount_error)
             return False, mount_error
         managed_volume_args = self._managed_volume_args(sandbox_id, sandbox_cfg)
+        tmpfs_args = self._tmpfs_args(sandbox_cfg)
+        shm_size_args = self._shm_size_args(sandbox_cfg)
         port_binding_args = self._port_binding_args(sandbox_id, sandbox_cfg)
         runtime_ok, runtime_environment_args, runtime_host_args, _, runtime_error = self._runtime_environment_args(
             sandbox_cfg
@@ -701,6 +727,7 @@ pkill -x sshd || true
             logger.error("Runtime contract failed for sandbox '%s': %s", sandbox_id, runtime_error)
             return False, runtime_error
         runtime_command = [] if sandbox_cfg.get('runtime_contract') else ['sleep', 'infinity']
+        rootfs_args = ['--read-only'] if self._as_bool(sandbox_cfg.get('read_only_rootfs', False)) else []
 
         base_cmd = [
             'run',
@@ -709,7 +736,10 @@ pkill -x sshd || true
             '-m', memory,
             '--cpus', str(cpus),
             '--detach',
+            *rootfs_args,
             *apt_tmpfs_args,
+            *tmpfs_args,
+            *shm_size_args,
             *shared_mount_args,
             *managed_volume_args,
             *port_binding_args,
@@ -729,7 +759,10 @@ pkill -x sshd || true
                 '--cpus', str(cpus),
                 '--detach',
                 '--storage-opt', f'size={disk_max}',
+                *rootfs_args,
                 *apt_tmpfs_args,
+                *tmpfs_args,
+                *shm_size_args,
                 *shared_mount_args,
                 *managed_volume_args,
                 *port_binding_args,

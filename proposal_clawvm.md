@@ -33,6 +33,8 @@ The first version must provide:
   user read/write access through ACLs rather than world-writable permissions.
 - First-launch console access so the user can install and configure the latest
   OpenClaw release through the official installation flow.
+- A broad preinstalled command-line toolkit for agent work, automation,
+  development, archive handling, database clients, and diagnostics.
 - Minimal health and diagnostic commands.
 
 The first version must not add a database, separate worker, custom REST API,
@@ -59,6 +61,61 @@ The only project-owned runtime code may be a minimal entrypoint: when
 script; otherwise it must run `sleep infinity` so the VM remains available in a
 console. It must not interpret requests, filter tools, proxy traffic, or persist
 data outside the mounted home directory.
+
+### 3.1.1 Preinstalled software
+
+ClawVM is intentionally blank with respect to OpenClaw, but it is not a sparse
+shell image. The base image must use a maintained Ubuntu or Debian release and
+install this broad, non-interactive baseline with `apt-get install -y
+--no-install-recommends`:
+
+```text
+ca-certificates curl wget gnupg lsb-release
+git openssh-client bash-completion
+jq
+unzip zip p7zip-full tar gzip bzip2 xz-utils zstd
+make gcc g++ build-essential pkg-config
+python3 python3-pip python3-venv python3-dev pipx
+sqlite3 libsqlite3-dev postgresql-client default-mysql-client redis-tools
+rsync rclone
+tzdata locales
+file tree less nano vim-tiny
+procps psmisc lsof strace htop btop iotop iftop
+tmux screen
+acl attr
+dnsutils iproute2 iputils-ping traceroute mtr-tiny
+netcat-openbsd socat nmap whois
+openssl age
+ripgrep fd-find fzf parallel pv entr shellcheck yamllint
+```
+
+Install the current active Node.js LTS through its official vendor distribution
+rather than the potentially obsolete distribution `nodejs` package. The image
+must expose `node`, `npm`, `npx`, `corepack`, Python 3, `pipx`, Git, and the
+database client commands on `PATH`. The OpenClaw local-prefix installer remains
+the source of OpenClaw itself; Node.js is a general-purpose tool and an
+installation fallback, not a bundled OpenClaw release.
+
+Install the maintained Go implementation of `yq` as a separately versioned,
+checksum-verified binary. Do not use Debian/Ubuntu's `yq` package: it is a
+different Python/jq wrapper and is not command-compatible with the widely used
+Go `yq`. Add an image-owned `fd` symlink to `fdfind` so the documented command
+name works on Debian-family systems.
+
+The default image must not include `openssh-server`, `cron`, `at`, `logrotate`,
+`ufw`, `iptables`, `nftables`, or `fail2ban`. They are services or host-network
+security controls that need an init system, persistent service state, or Linux
+capabilities deliberately absent from this non-root, read-only-root runtime.
+Database servers are likewise out of scope; only clients are preinstalled.
+Do not grant `clawvm` passwordless `sudo`: system-package changes belong in a
+new image build, while user-scoped packages installed through `pipx`, npm, or
+the OpenClaw installer remain portable below `data/`.
+
+`tcpdump` and `tshark` are excluded from the default image because packet capture
+needs additional Linux capabilities and can expose unrelated network traffic.
+Provide a documented, explicitly opt-in diagnostic image variant for them only
+when Docker or sndbx can grant the minimum required capabilities. This variant
+must retain the same non-root user, read-only-root, and data-mount contract.
 
 ### 3.2 Portable state and workspace
 
@@ -204,30 +261,40 @@ an unavoidable upstream OpenClaw integration requirement proves they are needed.
 1. Select the maintained base image and verify that it supports console access
   and the official current OpenClaw installation flow without placing OpenClaw
   in the ClawVM image.
-2. Create the independent `images/clawvm` Git repository and add its own
+2. Implement and build-test the documented package baseline, the official
+   current Node.js LTS distribution, the checksum-verified Go `yq` binary, and
+   the `fd` compatibility symlink. Keep the privileged packet-capture tools in
+   a separate opt-in image variant.
+3. Create the independent `images/clawvm` Git repository and add its own
    `.gitignore` for `data/` contents, secrets, logs, and local editor files.
-3. Implement the one-service Docker Compose deployment with the
+4. Implement the one-service Docker Compose deployment with the
   `/home/clawvm` mount, fixed UID/GID `1000`, native home variables, and
   configurable port mapping.
-4. Implement the matching sndbx template with the same image,
+5. Implement the matching sndbx template with the same image,
   `/home/clawvm` mount, fixed UID/GID `1000`, port mapping, and no hook unless
   it is demonstrably required.
-5. Write the short README and command reference for Docker and sndbx console
+6. Write the short README and command reference for Docker and sndbx console
   access, first-launch OpenClaw installation, creating `data/config/start.sh`,
   configuring a listener/port, and backup/restore by copying `data/`.
-6. Add the minimal sndbx `read_only_rootfs` configuration support and configure
+7. Add the minimal sndbx `read_only_rootfs` configuration support and configure
   ClawVM to use it with only documented `tmpfs` paths outside `/home/clawvm`.
-7. Write `SAMBA_SETUP.md` with commands to create the host collaboration group,
+8. Write `SAMBA_SETUP.md` with commands to create the host collaboration group,
   initialize setgid and default ACLs on `data/.openclaw/workspace`, add the
   Samba share, restrict it to that group, and test both directions of access.
   It must explicitly prohibit sharing `data/` or `/home/clawvm` as a whole.
-8. Run the acceptance checks below in Docker mode and sndbx mode.
+9. Run the acceptance checks below in Docker mode and sndbx mode.
 
 ## 6. Acceptance Criteria
 
 ### Docker mode
 
 - A fresh clone starts as a console-accessible VM without OpenClaw installed.
+- The documented baseline commands are available, including `node`, `npm`,
+  `npx`, `corepack`, `python3`, `pipx`, `git`, `jq`, `yq`, `fd`, `rg`,
+  `sqlite3`, `psql`, `mysql`, and `redis-cli`; `yq --version` identifies the
+  Go implementation.
+- `clawvm` has no passwordless `sudo`; the default image has no running
+  SSH, scheduler, firewall, or database-server daemon.
 - A write to a persistent path outside `/home/clawvm` fails; writes to the declared
   `tmpfs` paths disappear after recreation.
 - The user can install the current OpenClaw release through its official

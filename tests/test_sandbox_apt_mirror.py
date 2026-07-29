@@ -60,6 +60,46 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         create_command = manager._run_docker_cmd.call_args_list[0].args[0]
         self.assertNotIn("sleep", create_command)
 
+    def test_read_only_rootfs_adds_docker_read_only_flag(self) -> None:
+        """Apply the configured read-only root filesystem contract."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "read_only_rootfs": True,
+        })
+
+        success, _ = manager.create_sandbox("test")
+
+        self.assertTrue(success)
+        create_command = manager._run_docker_cmd.call_args_list[0].args[0]
+        self.assertIn("--read-only", create_command)
+
+    def test_declared_tmpfs_paths_are_added_to_docker_command(self) -> None:
+        """Mount only configured absolute tmpfs directories."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=16m"],
+        })
+
+        success, _ = manager.create_sandbox("test")
+
+        self.assertTrue(success)
+        create_command = manager._run_docker_cmd.call_args_list[0].args[0]
+        self.assertIn("/tmp:rw,noexec,nosuid,size=64m", create_command)
+        self.assertIn("/run:rw,noexec,nosuid,size=16m", create_command)
+
+    def test_declared_shm_size_is_added_to_docker_command(self) -> None:
+        """Apply a validated shared-memory size for browser workloads."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "shm_size": "1g",
+        })
+
+        success, _ = manager.create_sandbox("test")
+
+        self.assertTrue(success)
+        create_command = manager._run_docker_cmd.call_args_list[0].args[0]
+        self.assertEqual(create_command[create_command.index("--shm-size") + 1], "1g")
+
     def test_start_recreates_a_missing_sandbox_container(self) -> None:
         """Recover a persistent sandbox whose failed container was removed."""
         manager = self._create_manager({"image": "test-image"})
