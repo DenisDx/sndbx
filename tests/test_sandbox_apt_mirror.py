@@ -1,5 +1,6 @@
 """Tests for per-sandbox APT mirror behavior."""
 
+import json
 import unittest
 import tempfile
 from pathlib import Path
@@ -122,6 +123,33 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(output, "already running")
         manager._run_docker_cmd.assert_not_called()
+
+    def test_image_hook_receives_normalized_ssh_keys_as_root(self) -> None:
+        """Pass public key configuration to an image hook without full sandbox config."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            app_path = root / "images" / "test-image" / "app.py"
+            app_path.parent.mkdir(parents=True)
+            app_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            sandbox_config = {
+                "image": "test-image:latest",
+                "ssh_keys": [" ssh-ed25519 key-one ", "", "ssh-ed25519 key-one", 42],
+            }
+            manager = DockerSandboxManager({
+                "root": str(root),
+                "sandboxes": {"items": {"test": sandbox_config}},
+            })
+            manager._runtime_environment_args = Mock(return_value=(True, [], [], [], ""))
+            manager._run_docker_cmd = Mock(return_value=(True, "hook completed"))
+
+            success, _ = manager._run_image_hook("test", sandbox_config)
+
+            self.assertTrue(success)
+            command = manager._run_docker_cmd.call_args.args[0]
+            self.assertEqual(command[:3], ["exec", "--user", "root"])
+            context_arg = next(item for item in command if item.startswith("SNDBX_CONTEXT_JSON="))
+            context = json.loads(context_arg.removeprefix("SNDBX_CONTEXT_JSON="))
+            self.assertEqual(context["ssh_keys"], ["ssh-ed25519 key-one"])
 
     def test_managed_volume_never_uses_a_host_path(self) -> None:
         """Mount runtime storage as a Docker volume rather than a host bind."""

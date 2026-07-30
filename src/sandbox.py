@@ -495,6 +495,11 @@ class DockerSandboxManager:
             'sandbox_id': sandbox_id,
             'image_ref': image_ref,
             'resolved_mounts': resolved_mounts or [],
+            'ssh_keys': list(dict.fromkeys(
+                key.strip()
+                for key in sandbox_cfg.get('ssh_keys', [])
+                if isinstance(key, str) and key.strip()
+            )),
         }
         ctx_json = json.dumps(ctx, ensure_ascii=True)
 
@@ -504,6 +509,7 @@ class DockerSandboxManager:
 
         ok, out = self._run_docker_cmd([
             'exec',
+            '--user', 'root',
             *runtime_environment_args,
             '-e', f'SNDBX_HOOK={hook_name}',
             '-e', f'SNDBX_CONTEXT_JSON={ctx_json}',
