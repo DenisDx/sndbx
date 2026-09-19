@@ -38,10 +38,12 @@ shared/
 sessions/
 memory/
 
-# Optional private local images
-images/langvm/
-images/aibusiness/
-images/clawvm/
+# Local VM images, except the two default sandbox images.
+images/*/
+!images/default_sandbox_1/
+!images/default_sandbox_1/**
+!images/mcp_toolbox_1/
+!images/mcp_toolbox_1/**
 
 # Workspace/editor settings
 .vscode/
