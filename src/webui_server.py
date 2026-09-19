@@ -21,6 +21,8 @@ import secrets
 import struct
 import subprocess
 import termios
+import threading
+import time
 import tty
 import asyncio
 from urllib.parse import urlparse
@@ -376,6 +378,8 @@ class WebUIServer:
         self.started_event = asyncio.Event()
         self._restart_requested_at_monotonic: float = 0.0
         self._restart_state_ttl_sec: float = 120.0
+        self._image_builds: Dict[str, Dict[str, Any]] = {}
+        self._image_builds_lock = threading.Lock()
 
     def _mark_restarting(self) -> None:
         """Mark service state as restarting for status API consumers."""
@@ -413,6 +417,47 @@ class WebUIServer:
         if len(compact) > 320:
             compact = compact[:317] + "..."
         return f"Image '{image_ref}' {action_name} failed: {compact}"
+
+    def _images_view(self) -> List[Dict[str, Any]]:
+        """Return local images annotated with any active background build."""
+        with self._image_builds_lock:
+            active_builds = {image: dict(build) for image, build in self._image_builds.items()}
+        images = []
+        for image in self.sandbox_manager.list_local_images():
+            row = dict(image)
+            build = active_builds.get(str(row.get("image", "")))
+            row["build_status"] = "building" if build else "idle"
+            row["build_started_at"] = build.get("started_at") if build else None
+            row["build_action"] = build.get("action") if build else None
+            images.append(row)
+        return images
+
+    def _start_image_build(self, image_ref: str, action: str, no_cache: bool) -> tuple[bool, str]:
+        """Start one background build per image and return its accepted state."""
+        with self._image_builds_lock:
+            if image_ref in self._image_builds:
+                return False, f"Image '{image_ref}' is already building"
+            self._image_builds[image_ref] = {
+                "action": action,
+                "started_at": time.time(),
+            }
+
+        def build() -> None:
+            try:
+                ok, output = self.sandbox_manager.build_configured_image(image_ref, no_cache=no_cache)
+                message = self._image_action_message(image_ref, action, ok, output)
+                if ok:
+                    logger.info("%s", message)
+                else:
+                    logger.error("%s", message)
+            except Exception:
+                logger.exception("Image '%s' %s crashed", image_ref, action)
+            finally:
+                with self._image_builds_lock:
+                    self._image_builds.pop(image_ref, None)
+
+        threading.Thread(target=build, name=f"image-{action}-{image_ref}", daemon=True).start()
+        return True, f"Image '{image_ref}' {action} started"
 
     def _mcp_config_target(self) -> tuple[str, int, str]:
         """Return default MCP host, port and token from config."""
@@ -977,7 +1022,7 @@ class WebUIServer:
                 "service_state": self._service_state(),
                 "health": self._health_checks(),
                 "containers": self._containers_view(),
-                "images": self.sandbox_manager.list_local_images(),
+                "images": self._images_view(),
                 "session": {
                     "login": session.get("login", ""),
                 },
@@ -986,7 +1031,7 @@ class WebUIServer:
         @app.get("/api/images")
         async def images_endpoint(session: Dict[str, Any] = Depends(self._require_session)):
             return {
-                "images": self.sandbox_manager.list_local_images(),
+                "images": self._images_view(),
             }
 
         @app.post("/api/image/{image_ref}/action")
@@ -997,11 +1042,11 @@ class WebUIServer:
         ):
             action = body.action.strip().lower()
             if action == "build":
-                ok, out = self.sandbox_manager.build_configured_image(image_ref, no_cache=False)
-                return {"ok": ok, "message": self._image_action_message(image_ref, action, ok, out)}
+                ok, message = self._start_image_build(image_ref, action, no_cache=False)
+                return {"ok": ok, "message": message, "building": ok}
             if action in ("rebuild", "update"):
-                ok, out = self.sandbox_manager.build_configured_image(image_ref, no_cache=True)
-                return {"ok": ok, "message": self._image_action_message(image_ref, action, ok, out)}
+                ok, message = self._start_image_build(image_ref, "rebuild", no_cache=True)
+                return {"ok": ok, "message": message, "building": ok}
             raise HTTPException(status_code=400, detail="Unknown image action")
 
         @app.post("/api/sandbox/{sandbox_id}/action")

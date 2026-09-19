@@ -98,14 +98,55 @@ class DockerSandboxManager:
         ref = str(image_ref or '').strip()
         if not ref:
             return None
-        local_id = ref.split(':', 1)[0]
-        image_dir = self.images_dir / local_id
-        return local_id if image_dir.is_dir() else None
+        configured_ids = {
+            str(sandbox_cfg.get('local_image_id', '')).strip()
+            for sandbox_cfg in self.sandbox_configs.values()
+            if str(sandbox_cfg.get('image', '')).strip() == ref
+            and str(sandbox_cfg.get('local_image_id', '')).strip()
+        }
+        candidate_ids = configured_ids or {ref.split(':', 1)[0]}
+        for local_id in sorted(candidate_ids):
+            image_dir = self.images_dir / local_id
+            if image_dir.is_dir():
+                return local_id
+        return None
 
     def _docker_image_exists(self, image_ref: str) -> bool:
         """Check if image exists in local Docker image store."""
         ok, _ = self._run_docker_cmd(['image', 'inspect', image_ref], timeout=20)
         return ok
+
+    def _run_host_prepare_script(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> tuple[bool, str]:
+        """Run an image-local privileged host preparation script before deployment."""
+        script_name = sandbox_cfg.get('host_prepare_script')
+        if script_name is None:
+            return True, ''
+        if not isinstance(script_name, str) or not script_name.strip():
+            return False, 'host_prepare_script must be a non-empty string'
+
+        local_id = self._local_image_id_for_ref(str(sandbox_cfg.get('image', '')))
+        if not local_id:
+            return False, 'host_prepare_script requires a local image'
+        image_dir = (self.images_dir / local_id).resolve()
+        script_path = (image_dir / script_name).resolve()
+        if image_dir not in script_path.parents or not script_path.is_file():
+            return False, f'host_prepare_script not found in image directory: {script_name}'
+
+        try:
+            result = subprocess.run(
+                ['sudo', '-n', str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return False, 'host_prepare_script timed out'
+        except OSError as error:
+            return False, f'could not run host_prepare_script: {error}'
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            return False, output or 'host_prepare_script failed'
+        return True, (result.stdout + result.stderr).strip()
 
     def _build_local_image(self, local_id: str, image_ref: str, no_cache: bool = False) -> tuple[bool, str]:
         """Build image_ref from images/<local_id>/Dockerfile."""
@@ -697,6 +738,10 @@ pkill -x sshd || true
             return False, f"Sandbox {sandbox_id} not in configuration"
         
         sandbox_cfg = self.sandbox_configs[sandbox_id]
+        prepare_ok, prepare_msg = self._run_host_prepare_script(sandbox_id, sandbox_cfg)
+        if not prepare_ok:
+            logger.error("Host preparation failed for sandbox '%s': %s", sandbox_id, prepare_msg)
+            return False, f'host preparation failed: {prepare_msg}'
         image = sandbox_cfg.get('image', 'ubuntu:22.04')
         memory = sandbox_cfg.get('memory', '2G')
         cpus = sandbox_cfg.get('cpus', 2)
@@ -853,6 +898,11 @@ pkill -x sshd || true
         if status.running:
             logger.info("Sandbox '%s' is already running", sandbox_id)
             return True, "already running"
+        sandbox_cfg = self.sandbox_configs.get(sandbox_id, {})
+        prepare_ok, prepare_msg = self._run_host_prepare_script(sandbox_id, sandbox_cfg)
+        if not prepare_ok:
+            logger.error("Host preparation failed for sandbox '%s': %s", sandbox_id, prepare_msg)
+            return False, f'host preparation failed: {prepare_msg}'
         success, output = self._run_docker_cmd(['start', f'sndbx-{sandbox_id}'])
         if not success and 'No such container' in output:
             logger.info("Sandbox '%s' is absent; creating it before start", sandbox_id)
@@ -892,6 +942,11 @@ pkill -x sshd || true
 
     def restart_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
         """Restart a running sandbox container."""
+        sandbox_cfg = self.sandbox_configs.get(sandbox_id, {})
+        prepare_ok, prepare_msg = self._run_host_prepare_script(sandbox_id, sandbox_cfg)
+        if not prepare_ok:
+            logger.error("Host preparation failed for sandbox '%s': %s", sandbox_id, prepare_msg)
+            return False, f'host preparation failed: {prepare_msg}'
         success, output = self._run_docker_cmd(['restart', f'sndbx-{sandbox_id}'])
         if success:
             logger.info(f"Restarted sandbox {sandbox_id}")

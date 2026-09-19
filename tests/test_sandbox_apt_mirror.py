@@ -48,6 +48,20 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         self.assertTrue(success)
         manager.configure_apt_mirror.assert_not_called()
 
+    def test_failed_host_preparation_prevents_sandbox_creation(self) -> None:
+        """Stop before image preparation when required host ACL setup fails."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "host_prepare_script": "prepare_host_permissions.sh",
+        })
+        manager._run_host_prepare_script = Mock(return_value=(False, "sudo denied"))
+
+        success, output = manager.create_sandbox("test")
+
+        self.assertFalse(success)
+        self.assertEqual(output, "host preparation failed: sudo denied")
+        manager._ensure_image_ready.assert_not_called()
+
     def test_runtime_contract_uses_the_image_default_command(self) -> None:
         """Allow a declared runtime image to run its entrypoint."""
         manager = self._create_manager({
@@ -334,6 +348,25 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         self.assertTrue(success)
         command = manager._run_docker_cmd.call_args.args[0]
         self.assertIn("SNDBX_PROVIDES_POSTGRES=true", command)
+
+    def test_local_image_id_maps_a_docker_tag_to_its_source_directory(self) -> None:
+        """Use local_image_id when a Docker tag differs from the image folder."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "images" / "denis_obsidian_assistant").mkdir(parents=True)
+            manager = DockerSandboxManager({
+                "root": str(root),
+                "sandboxes": {"items": {
+                    "assistant": {
+                        "image": "denis-obsidian-assistant:latest",
+                        "local_image_id": "denis_obsidian_assistant",
+                    },
+                }},
+            })
+
+            local_image_id = manager._local_image_id_for_ref("denis-obsidian-assistant:latest")
+
+        self.assertEqual(local_image_id, "denis_obsidian_assistant")
 
 
 if __name__ == "__main__":

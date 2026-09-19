@@ -139,14 +139,24 @@ function sshButtons(sandboxId) {
   ].join("");
 }
 
-function imageButtons(imageRef) {
+function imageButtons(imageRef, building) {
   const mk = (label, action) =>
-    `<button onclick="runImageAction('${escapeHtml(imageRef)}','${action}')">${label}</button>`;
+    `<button onclick="runImageAction('${escapeHtml(imageRef)}','${action}')"${building ? " disabled" : ""}>${label}</button>`;
   return [
     mk("Build", "build"),
     mk("Rebuild", "rebuild"),
     mk("Update", "update"),
   ].join("");
+}
+
+function renderBuildStatus(image) {
+  if (image.build_status !== "building") {
+    return `<span class="badge">IDLE</span>`;
+  }
+  const startedAt = Number(image.build_started_at || 0) * 1000;
+  const elapsedSeconds = startedAt > 0 ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
+  const action = image.build_action === "build" ? "BUILDING" : "REBUILDING";
+  return `<span class="badge">${action} ${elapsedSeconds}s</span>`;
 }
 
 function renderStartupFlag(enabled) {
@@ -195,7 +205,7 @@ function renderImages(images) {
 
   if (!images || images.length === 0) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="7" class="muted">No configured images found</td>`;
+    tr.innerHTML = `<td colspan="8" class="muted">No configured images found</td>`;
     body.appendChild(tr);
     return;
   }
@@ -203,14 +213,16 @@ function renderImages(images) {
   images.forEach((img) => {
     const tr = document.createElement("tr");
     const refs = Array.isArray(img.sandboxes) ? img.sandboxes.join(", ") : "";
+    const building = img.build_status === "building";
     tr.innerHTML = `
       <td>${escapeHtml(img.image || "")}</td>
       <td>${escapeHtml(img.path || "—")}</td>
       <td>${yesNoBadge(!!img.built)}</td>
+      <td>${renderBuildStatus(img)}</td>
       <td>${yesNoBadge(!!img.has_dockerfile)}</td>
       <td>${yesNoBadge(!!img.has_app_py)}</td>
       <td>${escapeHtml(refs || "—")}</td>
-      <td><div class="actions">${imageButtons(img.image || "")}</div></td>
+      <td><div class="actions">${imageButtons(img.image || "", building)}</div></td>
     `;
     body.appendChild(tr);
   });
@@ -249,9 +261,9 @@ async function runImageAction(imageRef, action) {
     appendLocalLogLine(`[webui] ${verb} failed for image '${imageRef}': ${errMsg}`);
     return;
   }
-  const okMsg = (res.data && res.data.message) || "Image action completed";
+  const okMsg = (res.data && res.data.message) || "Image action started";
   setDashMessage(okMsg, true);
-  appendLocalLogLine(`[webui] ${verb} finished for image '${imageRef}'`);
+  appendLocalLogLine(`[webui] ${verb} accepted for image '${imageRef}'`);
   await loadDashboard();
 }
 window.runImageAction = runImageAction;
