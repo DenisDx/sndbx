@@ -156,13 +156,15 @@ function renderBuildStatus(image) {
   const startedAt = Number(image.build_started_at || 0) * 1000;
   const elapsedSeconds = startedAt > 0 ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
   const action = image.build_action === "build" ? "BUILDING" : "REBUILDING";
-  return `<span class="badge">${action} ${elapsedSeconds}s</span>`;
+  return `<span class="badge building">${action} ${elapsedSeconds}s</span>`;
 }
 
-function renderStartupFlag(enabled) {
-  return enabled
-    ? `<span class="badge ok">YES</span>`
-    : `<span class="badge">NO</span>`;
+function autoStartButton(sandboxId, enabled) {
+  const action = enabled ? "auto_start_disable" : "auto_start_enable";
+  const label = enabled ? "Enabled" : "Disabled";
+  const stateClass = enabled ? "enabled" : "disabled";
+  const title = enabled ? "Disable Auto-start" : "Enable Auto-start";
+  return `<button class="autostart ${stateClass}" title="${title}" onclick="runAction('${escapeHtml(sandboxId)}','${action}')">${label}</button>`;
 }
 
 function renderContainers(containers) {
@@ -180,7 +182,7 @@ function renderContainers(containers) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(c.sandbox_id || "")}</td>
-      <td>${renderStartupFlag(!!c.run_at_startup)}</td>
+      <td>${autoStartButton(c.sandbox_id || "", !!c.run_at_startup)}</td>
       <td>${escapeHtml(c.status || "")}</td>
       <td>${escapeHtml(c.image || "")}</td>
       <td>${escapeHtml(c.ports || "")}</td>

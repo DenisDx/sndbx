@@ -316,7 +316,7 @@ class DockerSandboxManager:
             if not isinstance(row, dict):
                 continue
 
-            bind_host = str(row.get('bind_host', '127.0.0.1')).strip() or '127.0.0.1'
+            bind_host = str(row.get('bind_host', '0.0.0.0')).strip() or '0.0.0.0'
             vm_port = row.get('vm_port')
             publish_port = row.get('publish_port')
 

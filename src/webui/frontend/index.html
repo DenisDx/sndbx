@@ -95,6 +95,8 @@
   }
   .ok { color: var(--ok); border-color: #2f6a4f; background: rgba(76, 175, 134, 0.12); }
   .bad { color: var(--err); border-color: #6a2f2f; background: rgba(224, 85, 85, 0.12); }
+  .building { color: #ffd98a; border-color: #6a4f17; background: rgba(240, 165, 0, 0.16); animation: build-pulse 1.2s ease-in-out infinite; }
+  @keyframes build-pulse { 50% { opacity: 0.55; } }
 
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
@@ -111,6 +113,19 @@
     font-size: 12px;
   }
   .actions button:hover { border-color: var(--accent); color: var(--accent); }
+  .autostart {
+    min-width: 82px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 8px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .autostart:hover { border-color: var(--accent); color: var(--accent); }
+  .autostart.enabled { border-color: #2f6a4f; background: rgba(76, 175, 134, 0.12); color: var(--ok); }
+  .autostart.enabled:hover { border-color: var(--ok); background: rgba(76, 175, 134, 0.2); }
 
   .muted { color: var(--muted); }
   #dash-message { min-height: 20px; color: var(--warn); margin: 8px 0 0; }

@@ -381,6 +381,35 @@ class WebUIServer:
         self._image_builds: Dict[str, Dict[str, Any]] = {}
         self._image_builds_lock = threading.Lock()
 
+    def _startup_overrides_path(self) -> Path:
+        """Return the persistent Auto-start override state-file path."""
+        return self.root_dir / "data" / "sandbox_startup_overrides.json"
+
+    def _set_sandbox_auto_start(self, sandbox_id: str, enabled: bool) -> tuple[bool, str]:
+        """Persist and apply a sandbox Auto-start setting without rewriting JSON5."""
+        sandboxes = self.config.get("sandboxes", {}).get("items", {})
+        sandbox_cfg = sandboxes.get(sandbox_id)
+        if not isinstance(sandbox_cfg, dict):
+            return False, f"Sandbox '{sandbox_id}' not found"
+
+        path = self._startup_overrides_path()
+        try:
+            overrides = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if not isinstance(overrides, dict):
+                return False, "Sandbox startup overrides are invalid"
+            overrides[sandbox_id] = enabled
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = path.with_suffix(".tmp")
+            temporary_path.write_text(json.dumps(overrides, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+            temporary_path.replace(path)
+        except (OSError, json.JSONDecodeError) as error:
+            return False, f"Could not save Auto-start setting: {error}"
+
+        sandbox_cfg["run_at_startup"] = enabled
+        self.sandbox_manager.sandbox_configs[sandbox_id]["run_at_startup"] = enabled
+        state = "enabled" if enabled else "disabled"
+        return True, f"Auto-start {state} for '{sandbox_id}'"
+
     def _mark_restarting(self) -> None:
         """Mark service state as restarting for status API consumers."""
         self._restart_requested_at_monotonic = asyncio.get_running_loop().time()
@@ -1057,6 +1086,10 @@ class WebUIServer:
         ):
             action = body.action.strip().lower()
 
+            if action in ("auto_start_enable", "auto_start_disable"):
+                ok, message = self._set_sandbox_auto_start(sandbox_id, action == "auto_start_enable")
+                return {"ok": ok, "message": message}
+
             if action == "start":
                 ok, out = self.sandbox_manager.start_sandbox(sandbox_id)
                 if not ok:
@@ -1074,6 +1107,7 @@ class WebUIServer:
             if action == "ssh_open":
                 sandbox_cfg = self.sandbox_manager.sandbox_configs.get(sandbox_id, {})
                 authorized_keys = [k for k in sandbox_cfg.get("ssh_keys", []) if isinstance(k, str) and k.strip()]
+                ssh_user = str(sandbox_cfg.get("ssh_user", "root")).strip() or "root"
                 if not authorized_keys:
                     return {"ok": False, "error": "no_ssh_keys",
                             "message": "No SSH keys configured. Add public keys to ssh_keys in config.json5."}
@@ -1085,9 +1119,10 @@ class WebUIServer:
                 if not container_ip:
                     return {"ok": False, "error": "no_container_ip",
                             "message": "Could not determine container IP address."}
-                setup_ok, setup_msg = self.sandbox_manager.exec_ssh_setup(sandbox_id, authorized_keys)
-                if not setup_ok:
-                    return {"ok": False, "error": "ssh_setup_failed", "message": setup_msg}
+                if not sandbox_cfg.get("ssh_setup_via_image_hook", False):
+                    setup_ok, setup_msg = self.sandbox_manager.exec_ssh_setup(sandbox_id, authorized_keys)
+                    if not setup_ok:
+                        return {"ok": False, "error": "ssh_setup_failed", "message": setup_msg}
                 ok, port, err = self.ssh_pool.open(sandbox_id, container_ip)
                 if not ok and err == "socat_not_installed":
                     return {
@@ -1096,7 +1131,7 @@ class WebUIServer:
                         "message": "Host package 'socat' is not installed. Install it: sudo apt-get update && sudo apt-get install -y socat",
                     }
                 return {"ok": ok, "ssh_port": port, "error": err,
-                        "message": f"SSH ready. Connect: ssh root@<host> -p {port}" if ok else err}
+                        "message": f"SSH ready. Connect: ssh {ssh_user}@<host> -p {port}" if ok else err}
 
             if action == "ssh_close":
                 ok = self.ssh_pool.close(sandbox_id)

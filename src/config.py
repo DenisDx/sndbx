@@ -16,6 +16,24 @@ class ConfigError(Exception):
     pass
 
 
+def apply_sandbox_startup_overrides(config: Dict[str, Any], root_dir: str) -> None:
+    """Apply persisted per-sandbox Auto-start choices to the loaded config."""
+    state_path = Path(root_dir) / 'data' / 'sandbox_startup_overrides.json'
+    try:
+        overrides = json.loads(state_path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as error:
+        raise ConfigError(f"Invalid sandbox startup overrides: {error}") from error
+
+    if not isinstance(overrides, dict):
+        raise ConfigError("Sandbox startup overrides must be an object")
+    sandboxes = config.get('sandboxes', {}).get('items', {})
+    for sandbox_id, enabled in overrides.items():
+        if sandbox_id in sandboxes and isinstance(enabled, bool):
+            sandboxes[sandbox_id]['run_at_startup'] = enabled
+
+
 def load_env_file(path: str) -> Dict[str, str]:
     """Load .env file into dictionary"""
     env_vars = {}
@@ -116,6 +134,7 @@ def load_config(root_dir: str = '.') -> Dict[str, Any]:
     
     # Load config
     config = load_config_json5(config_path, env_vars)
+    apply_sandbox_startup_overrides(config, root_dir)
     
     return {
         'env': env_vars,
