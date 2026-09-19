@@ -950,6 +950,18 @@ pkill -x sshd || true
         success, output = self._run_docker_cmd(['restart', f'sndbx-{sandbox_id}'])
         if success:
             logger.info(f"Restarted sandbox {sandbox_id}")
+            hook_ok, hook_msg = self._run_image_hook(
+                sandbox_id, sandbox_cfg, hook_name='on_system_start'
+            )
+            if not hook_ok:
+                if sandbox_cfg.get('runtime_contract'):
+                    self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
+                    return False, f"image hook failed: {hook_msg}"
+                logger.warning("image hook failed on restart for sandbox '%s': %s", sandbox_id, hook_msg)
+            runtime_ok, runtime_error = self._validate_runtime_start(sandbox_id, sandbox_cfg, hook_msg)
+            if not runtime_ok:
+                self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
+                return False, runtime_error
         return success, output
 
     def list_sandboxes(self) -> tuple[bool, List[Dict[str, Any]]]:
