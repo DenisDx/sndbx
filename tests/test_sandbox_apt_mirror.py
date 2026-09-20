@@ -115,6 +115,107 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         create_command = manager._run_docker_cmd.call_args_list[0].args[0]
         self.assertEqual(create_command[create_command.index("--shm-size") + 1], "1g")
 
+    def test_posix_acl_annotation_is_limited_to_kata_virtiofs(self) -> None:
+        """Pass only the supported POSIX ACL VirtioFS annotation to Kata."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "kata_annotations": {
+                "io.katacontainers.config.hypervisor.virtio_fs_extra_args": [
+                    "--thread-pool-size=1",
+                    "--announce-submounts",
+                    "--posix-acl",
+                ],
+            },
+        })
+
+        success, _ = manager.create_sandbox("test")
+
+        self.assertTrue(success)
+        create_command = manager._run_docker_cmd.call_args_list[0].args[0]
+        annotation_index = create_command.index("--annotation")
+        self.assertEqual(
+            create_command[annotation_index + 1],
+            "io.katacontainers.config.hypervisor.virtio_fs_extra_args="
+            "[\"--thread-pool-size=1\", \"--announce-submounts\", \"--posix-acl\"]",
+        )
+
+    def test_acl_compatibility_profile_uses_runtime_rs_annotation_format(self) -> None:
+        """Pass the fixed CSV annotation required by the Kata 4.1 runtime-rs shim."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "virtiofs_profile": "posix-acl-compat",
+        })
+
+        success, _ = manager.create_sandbox("test")
+
+        self.assertTrue(success)
+        create_command = manager._run_docker_cmd.call_args_list[0].args[0]
+        annotation_index = create_command.index("--annotation")
+        self.assertEqual(
+            create_command[annotation_index + 1],
+            "io.katacontainers.config.hypervisor.virtio_fs_extra_args="
+            "--thread-pool-size=1,--no-announce-submounts,--posix-acl=always",
+        )
+
+    def test_unknown_virtiofs_profile_blocks_sandbox_creation(self) -> None:
+        """Reject an unreviewed VirtioFS profile before Docker creation."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "virtiofs_profile": "untrusted-profile",
+        })
+
+        success, output = manager.create_sandbox("test")
+
+        self.assertFalse(success)
+        self.assertIn("unsupported virtiofs_profile", output)
+        manager._run_docker_cmd.assert_not_called()
+
+    def test_acl_compatibility_profile_rejects_nested_mounts(self) -> None:
+        """Reject nested host mount points hidden by the ACL compatibility profile."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "source"
+            source.mkdir()
+            manager = DockerSandboxManager({"root": temporary_directory, "sandboxes": {"items": {}}})
+            manager._nested_mount_points = Mock(return_value=[source / "nested-mount"])
+
+            ok, _, _, error = manager._preflight_shared_mounts("test", {
+                "shared_directories": [{
+                    "host_path": str(source),
+                    "guest_path": "/mnt/source",
+                    "source_type": "directory",
+                    "permission": "ro",
+                }],
+            }, reject_nested_mounts=True)
+
+        self.assertFalse(ok)
+        self.assertIn("does not support nested mount source", error)
+
+    def test_kata_acl_runtime_is_selected_only_when_configured(self) -> None:
+        """Use the isolated Kata ACL runtime only for an opted-in sandbox."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "kata_runtime": "kata-acl",
+        })
+
+        success, _ = manager.create_sandbox("test")
+
+        self.assertTrue(success)
+        create_command = manager._run_docker_cmd.call_args_list[0].args[0]
+        self.assertEqual(create_command[create_command.index("--runtime") + 1], "kata-acl")
+
+    def test_unsupported_kata_runtime_falls_back_to_default(self) -> None:
+        """Keep an invalid Kata runtime from reaching Docker."""
+        manager = self._create_manager({
+            "image": "test-image",
+            "kata_runtime": "untrusted-runtime",
+        })
+
+        success, _ = manager.create_sandbox("test")
+
+        self.assertTrue(success)
+        create_command = manager._run_docker_cmd.call_args_list[0].args[0]
+        self.assertEqual(create_command[create_command.index("--runtime") + 1], "kata")
+
     def test_start_recreates_a_missing_sandbox_container(self) -> None:
         """Recover a persistent sandbox whose failed container was removed."""
         manager = self._create_manager({"image": "test-image"})
@@ -215,6 +316,25 @@ class AptMirrorConfigurationTests(unittest.TestCase):
 
             self.assertFalse(ok)
             self.assertIn("required mount source is missing", error)
+
+    def test_legacy_mount_without_source_type_defaults_to_directory(self) -> None:
+        """Keep existing directory shares valid when source_type is absent."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "shared"
+            source.mkdir()
+            manager = DockerSandboxManager({"root": str(root), "sandboxes": {"items": {}}})
+
+            ok, args, _, error = manager._preflight_shared_mounts("test", {
+                "shared_directories": [{
+                    "host_path": str(source),
+                    "guest_path": "/mnt/shared",
+                    "permission": "rw",
+                }],
+            })
+
+        self.assertTrue(ok, error)
+        self.assertEqual(args, ["-v", f"{source}:/mnt/shared:rw"])
 
     def test_writable_directory_can_be_created_explicitly(self) -> None:
         """Create only an explicitly declared writable directory source."""

@@ -147,12 +147,13 @@ fi
 log_info "Found Docker: $(docker --version)"
 
 # Kata
-if ! command -v kata-runtime &> /dev/null; then
+KATA_SHIM="/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
+if [[ ! -x "$KATA_SHIM" ]]; then
     log_error "Kata runtime not found. Please run ./install_prerequisites.sh first"
     exit 1
 fi
 
-log_info "Found Kata runtime"
+log_info "Found Kata 4.1 runtime-rs shim"
 
 # Verify Kata runtime is registered with Docker
 if ! docker_cmd run --rm --name kata-check --runtime kata alpine echo "OK" >/dev/null; then

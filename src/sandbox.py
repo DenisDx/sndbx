@@ -175,7 +175,7 @@ class DockerSandboxManager:
         return self._build_local_image(local_id, image_ref, no_cache=False)
 
     def _preflight_shared_mounts(
-        self, sandbox_id: str, sandbox_cfg: Dict[str, Any]
+        self, sandbox_id: str, sandbox_cfg: Dict[str, Any], reject_nested_mounts: bool = False
     ) -> tuple[bool, List[str], List[Dict[str, Any]], str]:
         """Validate shared mounts and return Docker arguments with redacted metadata."""
         args: List[str] = []
@@ -189,7 +189,7 @@ class DockerSandboxManager:
                 return False, args, resolved, f"shared_directories[{index}] must be an object"
             host_path = str(row.get('host_path', '')).strip()
             guest_path = str(row.get('guest_path', '')).strip()
-            source_type = str(row.get('source_type') or row.get('mount_type') or '').strip().lower()
+            source_type = str(row.get('source_type') or row.get('mount_type') or 'directory').strip().lower()
             permission = str(row.get('permission', 'rw')).strip().lower()
             host_mode = str(row.get('host_mode', '')).strip()
             required = bool(row.get('required', True))
@@ -229,6 +229,13 @@ class DockerSandboxManager:
                     return False, args, resolved, (
                         f"mount source type mismatch for {host}: expected {source_type}"
                     )
+                if reject_nested_mounts and source_type == 'directory':
+                    nested_mounts = self._nested_mount_points(host)
+                    if nested_mounts:
+                        return False, args, resolved, (
+                            f"compatibility VirtioFS profile does not support nested mount source: "
+                            f"{nested_mounts[0]}"
+                        )
                 if host_mode:
                     os.chmod(host, int(host_mode, 8))
             except Exception as exc:
@@ -245,6 +252,29 @@ class DockerSandboxManager:
             })
 
         return True, args, resolved, ""
+
+    def _nested_mount_points(self, source: Path) -> List[Path]:
+        """List mount points below one resolved host directory."""
+        try:
+            source_path = source.resolve()
+            lines = Path('/proc/self/mountinfo').read_text(encoding='utf-8').splitlines()
+        except OSError as error:
+            logger.warning("Could not inspect mount points below '%s': %s", source, error)
+            return [source]
+
+        nested: List[Path] = []
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 5:
+                continue
+            mount_path = Path(re.sub(
+                r'\\([0-7]{3})',
+                lambda match: chr(int(match.group(1), 8)),
+                fields[4],
+            )).resolve()
+            if mount_path != source_path and source_path in mount_path.parents:
+                nested.append(mount_path)
+        return nested
 
     def _managed_volume_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
         """Build Docker-managed volume mounts that never expose host paths.
@@ -300,6 +330,45 @@ class DockerSandboxManager:
             logger.warning("Ignoring invalid shared-memory size: %r", size)
             return []
         return ['--shm-size', size]
+
+    def _kata_annotation_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
+        """Build allow-listed Kata OCI annotations for a sandbox."""
+        annotations = sandbox_cfg.get('kata_annotations', {})
+        if not isinstance(annotations, dict):
+            return []
+        key = 'io.katacontainers.config.hypervisor.virtio_fs_extra_args'
+        value = annotations.get(key)
+        supported_value = ['--thread-pool-size=1', '--announce-submounts', '--posix-acl']
+        if value != supported_value:
+            if value is not None:
+                logger.warning("Ignoring unsupported Kata annotation for sandbox '%s': %s", sandbox_id, key)
+            return []
+        return ['--annotation', f'{key}={json.dumps(value)}']
+
+    def _virtiofs_profile_args(
+        self, sandbox_id: str, sandbox_cfg: Dict[str, Any]
+    ) -> tuple[bool, List[str], bool, str]:
+        """Return fixed VirtioFS arguments and mount restrictions for one profile."""
+        profile = sandbox_cfg.get('virtiofs_profile')
+        if profile is None:
+            return True, [], False, ''
+        if profile != 'posix-acl-compat':
+            return False, [], False, f"unsupported virtiofs_profile for sandbox {sandbox_id}: {profile}"
+        key = 'io.katacontainers.config.hypervisor.virtio_fs_extra_args'
+        value = '--thread-pool-size=1,--no-announce-submounts,--posix-acl=always'
+        return True, ['--annotation', f'{key}={value}'], True, ''
+
+    def _kata_runtime_name(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> str:
+        """Return the approved Docker Kata runtime name for one sandbox."""
+        runtime_name = str(sandbox_cfg.get('kata_runtime', 'kata')).strip()
+        if runtime_name in {'kata', 'kata-acl'}:
+            return runtime_name
+        logger.warning(
+            "Ignoring unsupported Kata runtime for sandbox '%s': %s",
+            sandbox_id,
+            runtime_name,
+        )
+        return 'kata'
 
     def _port_binding_args(self, sandbox_id: str, sandbox_cfg: Dict[str, Any]) -> List[str]:
         """Build docker -p args from sandbox port_bindings config.
@@ -738,6 +807,12 @@ pkill -x sshd || true
             return False, f"Sandbox {sandbox_id} not in configuration"
         
         sandbox_cfg = self.sandbox_configs[sandbox_id]
+        profile_ok, virtiofs_profile_args, reject_nested_mounts, profile_error = self._virtiofs_profile_args(
+            sandbox_id, sandbox_cfg
+        )
+        if not profile_ok:
+            logger.error("VirtioFS profile failed for sandbox '%s': %s", sandbox_id, profile_error)
+            return False, profile_error
         prepare_ok, prepare_msg = self._run_host_prepare_script(sandbox_id, sandbox_cfg)
         if not prepare_ok:
             logger.error("Host preparation failed for sandbox '%s': %s", sandbox_id, prepare_msg)
@@ -762,7 +837,7 @@ pkill -x sshd || true
             '--tmpfs', '/var/cache/apt:rw,exec',
         ]
         mounts_ok, shared_mount_args, resolved_mounts, mount_error = self._preflight_shared_mounts(
-            sandbox_id, sandbox_cfg
+            sandbox_id, sandbox_cfg, reject_nested_mounts=reject_nested_mounts
         )
         if not mounts_ok:
             logger.error("Mount preflight failed for sandbox '%s': %s", sandbox_id, mount_error)
@@ -770,6 +845,8 @@ pkill -x sshd || true
         managed_volume_args = self._managed_volume_args(sandbox_id, sandbox_cfg)
         tmpfs_args = self._tmpfs_args(sandbox_cfg)
         shm_size_args = self._shm_size_args(sandbox_cfg)
+        kata_annotation_args = self._kata_annotation_args(sandbox_id, sandbox_cfg)
+        kata_runtime = self._kata_runtime_name(sandbox_id, sandbox_cfg)
         port_binding_args = self._port_binding_args(sandbox_id, sandbox_cfg)
         runtime_ok, runtime_environment_args, runtime_host_args, _, runtime_error = self._runtime_environment_args(
             sandbox_cfg
@@ -783,7 +860,7 @@ pkill -x sshd || true
         base_cmd = [
             'run',
             '--name', f'sndbx-{sandbox_id}',
-            '--runtime', 'kata',
+            '--runtime', kata_runtime,
             '-m', memory,
             '--cpus', str(cpus),
             '--detach',
@@ -791,6 +868,8 @@ pkill -x sshd || true
             *apt_tmpfs_args,
             *tmpfs_args,
             *shm_size_args,
+            *kata_annotation_args,
+            *virtiofs_profile_args,
             *shared_mount_args,
             *managed_volume_args,
             *port_binding_args,
@@ -805,7 +884,7 @@ pkill -x sshd || true
             cmd_with_disk_limit = [
                 'run',
                 '--name', f'sndbx-{sandbox_id}',
-                '--runtime', 'kata',
+                '--runtime', kata_runtime,
                 '-m', memory,
                 '--cpus', str(cpus),
                 '--detach',
@@ -814,6 +893,8 @@ pkill -x sshd || true
                 *apt_tmpfs_args,
                 *tmpfs_args,
                 *shm_size_args,
+                *kata_annotation_args,
+                *virtiofs_profile_args,
                 *shared_mount_args,
                 *managed_volume_args,
                 *port_binding_args,

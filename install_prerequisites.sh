@@ -3,6 +3,8 @@
 set -euo pipefail
 
 KATA_PATH="/opt/kata"
+KATA_VERSION="4.1.0"
+KATA_CONFIG_PATH="/etc/kata-containers/runtime-rs/configuration.toml"
 DOCKER_PATH=""
 TMP_PATH="/tmp"
 KATA_ARCHIVE=""  # pre-downloaded archive path (--kata_archive)
@@ -561,13 +563,6 @@ EOF
       changed=1
     fi
 
-    if grep -qE '^[[:space:]]*memory_slots[[:space:]]*=[[:space:]]*0[[:space:]]*$' "$cfg_file"; then
-      :
-    elif grep -qE '^[[:space:]]*memory_slots[[:space:]]*=' "$cfg_file"; then
-      run_sudo sed -i -E 's/^[[:space:]]*memory_slots[[:space:]]*=.*/memory_slots = 0/' "$cfg_file"
-      changed=1
-    fi
-
     if grep -qE '^[[:space:]]*path[[:space:]]*=[[:space:]]*"/usr/local/bin/kata-qemu-wrapper"[[:space:]]*$' "$cfg_file"; then
       :
     elif grep -qE '^[[:space:]]*path[[:space:]]*=[[:space:]]*".*qemu-system-x86_64"[[:space:]]*$' "$cfg_file"; then
@@ -586,9 +581,8 @@ EOF
   echo "$changed"
 }
 
-# ensure_docker_kata_runtime: register Kata runtime in Docker daemon config.
-# input: none
-# output: updates /etc/docker/daemon.json and restarts docker when changed
+# ensure_docker_kata_runtime: register Kata runtime-rs in Docker daemon config.
+# input: none; output: updates Docker and Kata runtime-rs configuration.
 ensure_docker_kata_runtime() {
   local daemon_file="/etc/docker/daemon.json"
   local tmpfile
@@ -598,7 +592,7 @@ ensure_docker_kata_runtime() {
   local cand
   local cfg_changed
 
-  defaults_dir="${KATA_PATH}/share/defaults/kata-containers"
+  defaults_dir="${KATA_PATH}/share/defaults/kata-containers/runtime-rs"
 
   run_sudo mkdir -p /etc/docker
   if [[ ! -f "$daemon_file" ]]; then
@@ -606,28 +600,25 @@ ensure_docker_kata_runtime() {
   fi
 
   tmpfile="$(mktemp)"
-  jq '
+  jq --arg shim "${KATA_PATH}/runtime-rs/bin/containerd-shim-kata-v2" --arg config "$KATA_CONFIG_PATH" '
     . as $cfg
     | ($cfg.runtimes // {}) as $r
-    | ($r.kata // {}) as $k
-    | $cfg + {runtimes: ($r + {kata: (($k + {runtimeType: "io.containerd.kata.v2"}) | del(.path))})}
+    | $cfg + {runtimes: ($r + {kata: {runtimeType: $shim, options: {ConfigPath: $config}}})}
   ' "$daemon_file" > "$tmpfile"
 
   if ! cmp -s "$tmpfile" "$daemon_file"; then
     run_sudo mv "$tmpfile" "$daemon_file"
     changed=1
-    print_info "Registered Docker runtime 'kata' -> io.containerd.kata.v2"
+    print_info "Registered Docker runtime 'kata' -> Kata runtime-rs shim"
   else
     rm -f "$tmpfile"
     print_info "Docker runtime 'kata' is already configured"
   fi
 
-  if [[ ! -f /etc/kata-containers/configuration.toml ]]; then
+  if [[ ! -f "$KATA_CONFIG_PATH" ]]; then
     for cand in \
-      "$defaults_dir/configuration.toml" \
-      "$defaults_dir/configuration-qemu.toml" \
-      "$defaults_dir/configuration-fc.toml" \
-      "$defaults_dir/configuration-clh.toml"; do
+      "$defaults_dir/configuration-qemu-runtime-rs.toml" \
+      "$defaults_dir/configuration.toml"; do
       if [[ -f "$cand" ]]; then
         chosen_cfg="$cand"
         break
@@ -635,29 +626,33 @@ ensure_docker_kata_runtime() {
     done
 
     if [[ -n "$chosen_cfg" ]]; then
-      run_sudo mkdir -p /etc/kata-containers
-      run_sudo cp "$chosen_cfg" /etc/kata-containers/configuration.toml
-      print_info "Installed Kata config: /etc/kata-containers/configuration.toml (source: $chosen_cfg)"
+      run_sudo mkdir -p "$(dirname "$KATA_CONFIG_PATH")"
+      run_sudo cp "$chosen_cfg" "$KATA_CONFIG_PATH"
+      print_info "Installed Kata runtime-rs config: $KATA_CONFIG_PATH (source: $chosen_cfg)"
       changed=1
     else
       print_warn "Could not find Kata default configuration in $defaults_dir"
-      print_warn "Create /etc/kata-containers/configuration.toml manually from available configuration-*.toml"
+      print_warn "Create $KATA_CONFIG_PATH manually from an available runtime-rs configuration template"
     fi
   fi
 
   # If Kata is installed in a custom path, update default /opt/kata paths in config.
-  if [[ -f /etc/kata-containers/configuration.toml && "$KATA_PATH" != "/opt/kata" ]]; then
-    if grep -q '/opt/kata/' /etc/kata-containers/configuration.toml; then
+  if [[ -f "$KATA_CONFIG_PATH" && "$KATA_PATH" != "/opt/kata" ]]; then
+    if grep -q '/opt/kata/' "$KATA_CONFIG_PATH"; then
       local escaped_kata
       escaped_kata="$(printf '%s' "$KATA_PATH" | sed 's/[\/&]/\\&/g')"
-      run_sudo sed -i "s#/opt/kata/#${escaped_kata}/#g" /etc/kata-containers/configuration.toml
-      print_info "Rewrote /opt/kata paths in /etc/kata-containers/configuration.toml to $KATA_PATH"
+      run_sudo sed -i "s#/opt/kata/#${escaped_kata}/#g" "$KATA_CONFIG_PATH"
+      print_info "Rewrote /opt/kata paths in $KATA_CONFIG_PATH to $KATA_PATH"
       changed=1
     fi
   fi
 
-  if [[ -f /etc/kata-containers/configuration.toml ]]; then
-    cfg_changed="$(ensure_kata_phys_bits_compat /etc/kata-containers/configuration.toml)"
+  if [[ -f "$KATA_CONFIG_PATH" ]]; then
+    if ! grep -q '"virtio_fs_extra_args"' "$KATA_CONFIG_PATH"; then
+      run_sudo sed -i -E '/^enable_annotations[[:space:]]*=/ s/\]$/, "virtio_fs_extra_args"]/' "$KATA_CONFIG_PATH"
+      changed=1
+    fi
+    cfg_changed="$(ensure_kata_phys_bits_compat "$KATA_CONFIG_PATH")"
     if [[ "$cfg_changed" == "1" ]]; then
       print_info "Applied Kata hypervisor compatibility settings"
       changed=1
@@ -665,41 +660,18 @@ ensure_docker_kata_runtime() {
   fi
 
   if [[ "$changed" -eq 1 ]]; then
-    if run_sudo timeout 30 systemctl restart docker; then
-      print_info "Docker restarted successfully after runtime update."
+    if run_sudo timeout 30 systemctl reload docker; then
+      print_info "Docker reloaded successfully after runtime update."
     else
-      print_warn "Docker restart timed out or failed. Check: sudo systemctl status docker --no-pager -l"
+      print_warn "Docker reload timed out or failed. Check: sudo systemctl status docker --no-pager -l"
     fi
   fi
 
   local runtimes_json
   runtimes_json="$(docker_info_runtimes_json)"
   if [[ "$runtimes_json" != *'"kata"'* ]]; then
-    print_warn "Docker runtime 'kata' is not visible with runtimeType config. Trying legacy shim-path fallback."
-
-    tmpfile="$(mktemp)"
-    jq '
-      . as $cfg
-      | ($cfg.runtimes // {}) as $r
-      | ($r.kata // {}) as $k
-      | $cfg + {runtimes: ($r + {kata: (($k + {path: "/usr/local/bin/containerd-shim-kata-v2", runtimeArgs: []}) | del(.runtimeType))})}
-    ' "$daemon_file" > "$tmpfile"
-
-    if ! cmp -s "$tmpfile" "$daemon_file"; then
-      run_sudo mv "$tmpfile" "$daemon_file"
-      changed=1
-      print_info "Applied legacy Docker runtime config for 'kata' -> /usr/local/bin/containerd-shim-kata-v2"
-    else
-      rm -f "$tmpfile"
-    fi
-
-    if [[ "$changed" -eq 1 ]]; then
-      if run_sudo timeout 30 systemctl restart docker; then
-        print_info "Docker restarted successfully after legacy runtime update."
-      else
-        print_warn "Docker restart timed out or failed. Check: sudo systemctl status docker --no-pager -l"
-      fi
-    fi
+    print_error "Docker runtime 'kata' is not visible after runtime-rs registration."
+    return 1
   fi
 }
 
@@ -735,9 +707,9 @@ docker_info_runtimes_json() {
 verify_kata_runtime_ready() {
   local runtimes_json
 
-  if ! test -f /etc/kata-containers/configuration.toml; then
-    print_error "Missing /etc/kata-containers/configuration.toml"
-    print_hint "Copy one of: ${KATA_PATH}/share/defaults/kata-containers/configuration-*.toml"
+  if ! test -f "$KATA_CONFIG_PATH"; then
+    print_error "Missing $KATA_CONFIG_PATH"
+    print_hint "Copy ${KATA_PATH}/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml"
     exit 1
   fi
 
@@ -862,11 +834,27 @@ detect_kata_arch() {
   esac
 }
 
-# is_kata_installed: check whether Kata runtime is present in target path.
-# input: none
-# output: success code if installed in target path
+# kata_archive_sha256: return the pinned archive digest for one supported architecture.
+# input: Kata release architecture; output: SHA-256 digest.
+kata_archive_sha256() {
+  case "$1" in
+    amd64)
+      echo "3dc6b69c4acb787b967b04b64599a20d02a8beb1a8eaab3084110df9d0b08c96"
+      ;;
+    arm64)
+      echo "cf036de3d184dc080fe84dfbdbf06cd6811386224ff8c6aaee3b5d732722e58f"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# is_kata_installed: check whether the pinned Kata runtime-rs shim is installed.
+# input: none; output: success only for the supported Kata version.
 is_kata_installed() {
-  [[ -x "$KATA_PATH/bin/kata-runtime" && -x "$KATA_PATH/bin/containerd-shim-kata-v2" ]]
+  local shim_path="$KATA_PATH/runtime-rs/bin/containerd-shim-kata-v2"
+  [[ -x "$shim_path" ]] && "$shim_path" --version 2>/dev/null | grep -Fqx "${KATA_VERSION}"
 }
 
 # install_kata_if_missing: install Kata static release only when absent.
@@ -880,18 +868,24 @@ install_kata_if_missing() {
 
   if [[ -d "$KATA_PATH" ]]; then
     if [[ -n "$(ls -A "$KATA_PATH" 2>/dev/null)" ]]; then
-      print_error "Target Kata path exists and is not empty: $KATA_PATH"
-      print_hint "Remove it manually: sudo rm -rf $KATA_PATH"
+      print_error "Existing Kata at $KATA_PATH is not the required Kata ${KATA_VERSION} runtime-rs installation."
+      print_hint "The installer refuses to replace an existing runtime automatically."
+      print_hint "Stop and remove every Kata sandbox, preserve a backup, then perform the documented migration."
       exit 1
     fi
   fi
 
   local kata_arch
+  local expected_sha256
   local tar_path
   local tmp_extract
   local downloaded=0
 
   kata_arch="$(detect_kata_arch)"
+  expected_sha256="$(kata_archive_sha256 "$kata_arch")" || {
+    print_error "No pinned Kata checksum is available for $kata_arch."
+    exit 1
+  }
 
   if [[ -n "$KATA_ARCHIVE" ]]; then
     # Offline mode: use pre-downloaded archive.
@@ -902,17 +896,7 @@ install_kata_if_missing() {
     tar_path="$KATA_ARCHIVE"
     print_info "Using pre-downloaded archive: $tar_path"
   else
-    local kata_ver
-    print_info "Fetching latest Kata release version from GitHub..."
-    kata_ver="$(curl -fsSL --retry 3 --retry-delay 2 \
-      https://api.github.com/repos/kata-containers/kata-containers/releases/latest \
-      | jq -r '.tag_name' | sed 's/^v//')"
-    if [[ -z "$kata_ver" ]]; then
-      print_error "Could not determine Kata version from GitHub API."
-      print_hint "Check internet connectivity or use: --kata_archive /path/to/kata-static-*.tar.zst"
-      exit 1
-    fi
-    print_info "Latest Kata release: ${kata_ver}"
+    print_info "Using pinned Kata release: ${KATA_VERSION}"
 
     if [[ ! -d "$TMP_PATH" ]]; then
       mkdir -p "$TMP_PATH" 2>/dev/null || {
@@ -921,15 +905,15 @@ install_kata_if_missing() {
       }
     fi
 
-    local archive_name="kata-static-${kata_ver}-${kata_arch}.tar.zst"
-    local base_url="https://github.com/kata-containers/kata-containers/releases/download/${kata_ver}"
+    local archive_name="kata-static-${KATA_VERSION}-${kata_arch}.tar.zst"
+    local base_url="https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}"
     tar_path="${TMP_PATH}/${archive_name}"
 
-    print_info "Downloading Kata ${kata_ver} (${kata_arch}) — ~300 MB, may take a while..."
+    print_info "Downloading Kata ${KATA_VERSION} (${kata_arch}) — may take a while..."
     local attempt
     for attempt in 1 2 3; do
       # -C - resumes partial downloads.
-      if curl -fL --retry 3 --retry-delay 5 -C - --progress-bar \
+      if curl --http1.1 -fL --retry 3 --retry-delay 5 -C - --progress-bar \
           -o "$tar_path" "${base_url}/${archive_name}"; then
         downloaded=1
         break
@@ -942,27 +926,15 @@ install_kata_if_missing() {
       print_warn "Attempt ${attempt} failed, retrying..."
     done
 
-    # Verify SHA256 checksum.
-    print_info "Verifying SHA256 checksum..."
-    local checksum_file="${tar_path}.sha256sum"
-    if curl -fsSL --retry 3 --retry-delay 2 \
-        -o "$checksum_file" "${base_url}/${archive_name}.sha256sum" 2>/dev/null; then
-      local expected actual
-      expected="$(awk '{print $1}' "$checksum_file")"
-      actual="$(sha256sum "$tar_path" | awk '{print $1}')"
-      rm -f "$checksum_file"
-      if [[ "$expected" != "$actual" ]]; then
-        print_error "SHA256 mismatch — archive is corrupted."
-        print_hint "Expected: $expected"
-        print_hint "Got:      $actual"
-        rm -f "$tar_path"
-        exit 1
-      fi
-      print_ok "SHA256 checksum verified."
-    else
-      print_warn "Checksum file unavailable; skipping SHA256 verification."
-    fi
   fi
+
+  print_info "Verifying pinned SHA256 checksum..."
+  if ! printf '%s  %s\n' "$expected_sha256" "$tar_path" | sha256sum --check --status; then
+    print_error "SHA256 mismatch — archive is corrupted or not Kata ${KATA_VERSION}."
+    [[ "$downloaded" -eq 1 ]] && rm -f "$tar_path"
+    exit 1
+  fi
+  print_ok "SHA256 checksum verified."
 
   tmp_extract="$(mktemp -d -p "$TMP_PATH")"
 
@@ -974,8 +946,8 @@ install_kata_if_missing() {
     exit 1
   fi
 
-  if [[ ! -d "$tmp_extract/opt/kata" ]]; then
-    print_error "Unexpected archive layout: missing opt/kata"
+  if [[ ! -x "$tmp_extract/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]]; then
+    print_error "Unexpected archive layout: missing Kata runtime-rs shim"
     rm -rf "$tmp_extract"
     exit 1
   fi
@@ -983,8 +955,7 @@ install_kata_if_missing() {
   run_sudo mkdir -p "$KATA_PATH"
   run_sudo cp -a "$tmp_extract/opt/kata/." "$KATA_PATH/"
 
-  run_sudo ln -sfn "$KATA_PATH/bin/kata-runtime" /usr/local/bin/kata-runtime
-  run_sudo ln -sfn "$KATA_PATH/bin/containerd-shim-kata-v2" /usr/local/bin/containerd-shim-kata-v2
+  run_sudo ln -sfn "$KATA_PATH/runtime-rs/bin/containerd-shim-kata-v2" /usr/local/bin/containerd-shim-kata-v2
 
   rm -rf "$tmp_extract"
   [[ "$downloaded" -eq 1 ]] && rm -f "$tar_path"

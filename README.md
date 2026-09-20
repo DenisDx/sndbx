@@ -62,8 +62,8 @@ The script behavior:
 - Skips Docker package install if Docker is already present (including snap, `docker-ce`, `docker.io`)
 - Enables/starts Docker only when needed
 - Adds current user to `docker` group only when missing
-- Installs Kata only when missing (to `--kata_path` if specified)
-- Verifies SHA256 checksum of the downloaded Kata archive
+- Installs pinned Kata 4.1 runtime-rs only when missing (to `--kata_path` if specified)
+- Verifies a pinned SHA256 checksum for the downloaded or supplied Kata archive
 - Resumes interrupted downloads automatically (no need to restart from scratch)
 - Sets Docker data directory (`data-root`) to `--docker_path` if specified
 - Uses `--tmp_path` for temporary download/extraction (default: `/tmp`)
@@ -102,20 +102,14 @@ kvm-ok
 If `kvm-ok` reports nested virtualization issues, enable nested mode on the host before continuing.
 
 ### 3. Install Kata Containers
-Ubuntu repositories may not provide a `kata-containers` package, so install the official static release.
+`install_prerequisites.sh` installs the supported Kata 4.1 static release and
+registers Docker runtime `kata`. It uses the runtime-rs shim and configuration
+at `/etc/kata-containers/runtime-rs/configuration.toml`; do not replace it with
+the deprecated `kata-runtime` binary setup. Run the prerequisite installer
+instead of downloading an unpinned latest release manually:
 
 ```bash
-ARCH=$(uname -m)
-if [[ "$ARCH" == "x86_64" ]]; then KATA_ARCH="amd64";
-elif [[ "$ARCH" == "aarch64" ]]; then KATA_ARCH="arm64";
-else echo "Unsupported arch: $ARCH"; exit 1; fi
-
-KATA_VER=$(curl -fsSL https://api.github.com/repos/kata-containers/kata-containers/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-curl -fL -o /tmp/kata-static.tar.zst "https://github.com/kata-containers/kata-containers/releases/download/${KATA_VER}/kata-static-${KATA_VER}-${KATA_ARCH}.tar.zst"
-sudo tar --zstd -xvf /tmp/kata-static.tar.zst -C /
-sudo ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
-sudo ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
-kata-runtime --version
+./install_prerequisites.sh
 ```
 
 ### 4. Install Firecracker
@@ -147,7 +141,7 @@ if [[ ! -f /etc/docker/daemon.json ]]; then
 fi
 
 tmpfile=$(mktemp)
-jq '.runtimes.kata = {"path":"/usr/local/bin/kata-runtime"}' /etc/docker/daemon.json > "$tmpfile"
+jq '.runtimes.kata = {"runtimeType":"/opt/kata/runtime-rs/bin/containerd-shim-kata-v2","options":{"ConfigPath":"/etc/kata-containers/runtime-rs/configuration.toml"}}' /etc/docker/daemon.json > "$tmpfile"
 sudo mv "$tmpfile" /etc/docker/daemon.json
 sudo systemctl restart docker
 ```
@@ -170,7 +164,7 @@ cp .env.example .env
 ### 7. Verify Installation
 
 ```bash
-kata-runtime --version
+/opt/kata/runtime-rs/bin/containerd-shim-kata-v2 --version
 firecracker --version
 docker info | grep -A5 Runtimes
 ```
@@ -586,11 +580,11 @@ Web UI dashboard includes a "Local images" panel with Build/Rebuild/Update butto
 
 ### Sandbox creation fails
 
-- Verify Kata runtime is available: `kata-runtime --version`
+- Verify Kata runtime is available: `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2 --version`
 - Check Docker daemon: `docker ps`
 - Inspect Docker logs: `sudo journalctl -u docker -f`
 - Test manual Docker run: `docker run --rm --runtime kata alpine echo "test"`
-- If `docker run --runtime kata ...` fails with `Cannot find usable config file` or exit code `125`, restore `/etc/kata-containers/configuration.toml` from Kata defaults (see "Verify Installation" section above)
+- If `docker run --runtime kata ...` fails with `Cannot find usable config file` or exit code `125`, restore `/etc/kata-containers/runtime-rs/configuration.toml` from the Kata 4.1 runtime-rs QEMU default
 
 ### apt commands inside sandbox are very slow
 
