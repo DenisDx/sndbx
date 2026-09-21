@@ -261,7 +261,7 @@ class AptMirrorConfigurationTests(unittest.TestCase):
 
             self.assertTrue(success)
             command = manager._run_docker_cmd.call_args.args[0]
-            self.assertEqual(command[:3], ["exec", "--user", "root"])
+            self.assertEqual(command[:3], ["exec", "--user", "0"])
             context_arg = next(item for item in command if item.startswith("SNDBX_CONTEXT_JSON="))
             context = json.loads(context_arg.removeprefix("SNDBX_CONTEXT_JSON="))
             self.assertEqual(context["ssh_keys"], ["ssh-ed25519 key-one"])

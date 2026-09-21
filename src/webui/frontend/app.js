@@ -237,7 +237,21 @@ function setDashMessage(text, ok = false) {
 }
 
 async function runAction(sandboxId, action) {
-  const res = await apiPost(`/api/sandbox/${encodeURIComponent(sandboxId)}/action`, { action });
+  const actionNames = {
+    start: "Starting",
+    stop: "Stopping",
+    restart: "Restarting",
+  };
+  const actionName = actionNames[action] || "Updating";
+  setDashMessage(`${actionName} sndbx-${sandboxId}...`, true);
+
+  let res;
+  try {
+    res = await apiPost(`/api/sandbox/${encodeURIComponent(sandboxId)}/action`, { action });
+  } catch (error) {
+    setDashMessage(`${actionName} sndbx-${sandboxId} failed: ${error.message || error}`, false);
+    return;
+  }
   const payloadOk = !!(res.data && res.data.ok);
   if (!res.ok || !payloadOk) {
     setDashMessage((res.data && (res.data.message || res.data.detail || res.data.error)) || "Action failed", false);

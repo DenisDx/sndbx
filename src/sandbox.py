@@ -619,7 +619,7 @@ class DockerSandboxManager:
 
         ok, out = self._run_docker_cmd([
             'exec',
-            '--user', 'root',
+            '--user', '0',
             *runtime_environment_args,
             '-e', f'SNDBX_HOOK={hook_name}',
             '-e', f'SNDBX_CONTEXT_JSON={ctx_json}',

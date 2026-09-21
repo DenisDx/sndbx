@@ -1148,7 +1148,13 @@ class WebUIServer:
 
     async def start(self) -> None:
         """Run uvicorn server."""
-        cfg = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info")
+        cfg = uvicorn.Config(
+            self.app,
+            host=self.host,
+            port=self.port,
+            log_level="info",
+            access_log=False,
+        )
         self._server = uvicorn.Server(cfg)
 
         async def _mark_started() -> None:
