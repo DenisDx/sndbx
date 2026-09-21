@@ -336,6 +336,46 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         self.assertTrue(ok, error)
         self.assertEqual(args, ["-v", f"{source}:/mnt/shared:rw"])
 
+    def test_directory_mount_supports_shared_bind_propagation(self) -> None:
+        """Pass an allowed bind propagation mode to Docker for directory shares."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "shared"
+            source.mkdir()
+            manager = DockerSandboxManager({"root": str(root), "sandboxes": {"items": {}}})
+
+            ok, args, resolved, error = manager._preflight_shared_mounts("test", {
+                "shared_directories": [{
+                    "host_path": str(source),
+                    "guest_path": "/mnt/shared",
+                    "permission": "rw",
+                    "bind_propagation": "rshared",
+                }],
+            })
+
+        self.assertTrue(ok, error)
+        self.assertEqual(args, ["-v", f"{source}:/mnt/shared:rw,rshared"])
+        self.assertEqual(resolved[0]["bind_propagation"], "rshared")
+
+    def test_invalid_bind_propagation_is_rejected(self) -> None:
+        """Reject unsupported Docker bind propagation modes before creation."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "shared"
+            source.mkdir()
+            manager = DockerSandboxManager({"root": str(root), "sandboxes": {"items": {}}})
+
+            ok, _, _, error = manager._preflight_shared_mounts("test", {
+                "shared_directories": [{
+                    "host_path": str(source),
+                    "guest_path": "/mnt/shared",
+                    "bind_propagation": "invalid",
+                }],
+            })
+
+        self.assertFalse(ok)
+        self.assertIn("bind_propagation is invalid", error)
+
     def test_writable_directory_can_be_created_explicitly(self) -> None:
         """Create only an explicitly declared writable directory source."""
         with tempfile.TemporaryDirectory() as temporary_directory:

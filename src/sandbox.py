@@ -192,6 +192,7 @@ class DockerSandboxManager:
             source_type = str(row.get('source_type') or row.get('mount_type') or 'directory').strip().lower()
             permission = str(row.get('permission', 'rw')).strip().lower()
             host_mode = str(row.get('host_mode', '')).strip()
+            bind_propagation = str(row.get('bind_propagation', '')).strip().lower()
             required = bool(row.get('required', True))
             create_if_missing = bool(row.get('create_if_missing', False))
             mode = 'ro' if permission == 'ro' else 'rw'
@@ -207,6 +208,16 @@ class DockerSandboxManager:
             if source_type not in {'file', 'directory'}:
                 return False, args, resolved, (
                     f"shared_directories[{index}] source_type must be file or directory"
+                )
+            if bind_propagation and bind_propagation not in {
+                'private', 'rprivate', 'slave', 'rslave', 'shared', 'rshared',
+            }:
+                return False, args, resolved, (
+                    f"shared_directories[{index}] bind_propagation is invalid"
+                )
+            if bind_propagation and source_type != 'directory':
+                return False, args, resolved, (
+                    f"shared_directories[{index}] bind_propagation requires a directory source"
                 )
             if create_if_missing and (source_type != 'directory' or permission != 'rw'):
                 return False, args, resolved, (
@@ -243,11 +254,13 @@ class DockerSandboxManager:
                     f"could not prepare mount source for sandbox {sandbox_id}: {host}: {exc}"
                 )
 
-            args.extend(['-v', f'{host}:{guest_path}:{mode}'])
+            mount_mode = f'{mode},{bind_propagation}' if bind_propagation else mode
+            args.extend(['-v', f'{host}:{guest_path}:{mount_mode}'])
             resolved.append({
                 'guest_path': guest_path,
                 'source_type': source_type,
                 'permission': permission,
+                'bind_propagation': bind_propagation,
                 'required': required,
             })
 
