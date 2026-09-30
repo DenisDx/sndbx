@@ -414,6 +414,26 @@ class WebUIServer:
         """Mark service state as restarting for status API consumers."""
         self._restart_requested_at_monotonic = asyncio.get_running_loop().time()
 
+    async def _restart_service_soon(self, delay_seconds: float = 0.4) -> None:
+        """Restart the manager without running its sandbox-stopping shutdown path."""
+        await asyncio.sleep(max(0.05, float(delay_seconds or 0.0)))
+
+        unit_name = os.environ.get("SNDBX_SYSTEMD_UNIT", "sndbx")
+        restart_cmd = ["systemctl", "--user", "kill", "--kill-whom=main", "--signal=SIGKILL", unit_name]
+        try:
+            subprocess.Popen(
+                restart_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info("Requested service restart via systemd: %s", " ".join(restart_cmd))
+            return
+        except Exception as error:
+            logger.warning("Systemd restart request failed; using SIGKILL fallback: %s", error)
+
+        os.kill(os.getpid(), signal.SIGKILL)
+
     def _service_state(self) -> str:
         """Return current service state for Web UI polling."""
         ts = float(self._restart_requested_at_monotonic or 0.0)

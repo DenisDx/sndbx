@@ -102,6 +102,46 @@
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
 
+  .table-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .table-panel-header .card-title { margin-bottom: 0; }
+  .table-panel-controls { display: flex; gap: 6px; }
+  .table-panel-controls button {
+    padding: 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .table-panel-controls button:hover { border-color: var(--accent); color: var(--text); }
+  .table-panel-controls button.active { border-color: var(--accent); color: var(--accent); }
+  .table-region { overflow-x: auto; }
+  .table-region table { min-width: 760px; }
+  .table-panel.advanced .table-region {
+    height: 360px;
+    min-height: 180px;
+    max-height: 70vh;
+    resize: vertical;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .table-panel.advanced .table-region th,
+  .table-panel.advanced .table-region td { white-space: nowrap; }
+  .table-panel.condensed .table-region,
+  .table-panel.condensed #dash-message { display: none; }
+  .table-panel.condensed .table-panel-header { margin-bottom: 0; }
+  @media (max-width: 600px) {
+    .table-panel-header { align-items: flex-start; flex-direction: column; }
+  }
+
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .actions button {
     border: 1px solid var(--border);
@@ -347,9 +387,15 @@
         </div>
       </div>
 
-      <div class="card">
+      <div id="containers-panel" class="card table-panel condensed">
+        <div class="table-panel-header">
           <div class="card-title">Current containers</div>
-        <table>
+          <div class="table-panel-controls" aria-label="Current containers view">
+            <button type="button" data-table-panel-toggle="containers" aria-expanded="false">Advance</button>
+          </div>
+        </div>
+        <div class="table-region">
+          <table>
           <thead>
             <tr>
               <th>Sandbox</th>
@@ -363,13 +409,20 @@
             </tr>
           </thead>
           <tbody id="containers-body"></tbody>
-        </table>
+          </table>
+        </div>
         <div id="dash-message"></div>
       </div>
 
-      <div class="card">
-        <div class="card-title">Local images</div>
-        <table>
+      <div id="images-panel" class="card table-panel condensed">
+        <div class="table-panel-header">
+          <div class="card-title">Local images</div>
+          <div class="table-panel-controls" aria-label="Local images view">
+            <button type="button" data-table-panel-toggle="images" aria-expanded="false">Advance</button>
+          </div>
+        </div>
+        <div class="table-region">
+          <table>
           <thead>
             <tr>
               <th>Image</th>
@@ -383,7 +436,8 @@
             </tr>
           </thead>
           <tbody id="images-body"></tbody>
-        </table>
+          </table>
+        </div>
       </div>
 
       <div class="card">

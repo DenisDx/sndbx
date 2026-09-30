@@ -11,6 +11,7 @@ let termDataDisposable = null;
 let logPanelBound = false;
 let restartInProgress = false;
 let suppressAutoLogout = false;
+let tablePanelsBound = false;
 
 function showScreen(name) {
   $("login-screen").style.display = name === "login" ? "flex" : "none";
@@ -42,6 +43,40 @@ function showPage(name) {
 function isDashboardActive() {
   const page = $("page-dashboard");
   return !!(page && page.classList.contains("active"));
+}
+
+function setTablePanelExpanded(panelName, expanded, persist = true) {
+  const panel = $(`${panelName}-panel`);
+  if (!panel) return;
+
+  panel.classList.toggle("advanced", expanded);
+  panel.classList.toggle("condensed", !expanded);
+  const button = document.querySelector(`[data-table-panel-toggle="${panelName}"]`);
+  if (button) {
+    button.textContent = expanded ? "Condense" : "Advance";
+    button.setAttribute("aria-expanded", String(expanded));
+  }
+
+  if (persist) {
+    localStorage.setItem(`sndbx.table-panel.${panelName}`, expanded ? "advanced" : "condensed");
+  }
+}
+
+function setupTablePanels() {
+  if (tablePanelsBound) return;
+
+  document.querySelectorAll("[data-table-panel-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const panelName = button.dataset.tablePanelToggle || "";
+      setTablePanelExpanded(panelName, button.getAttribute("aria-expanded") !== "true");
+    });
+  });
+
+  ["containers", "images"].forEach((panelName) => {
+    const savedMode = localStorage.getItem(`sndbx.table-panel.${panelName}`);
+    setTablePanelExpanded(panelName, savedMode === "advanced", false);
+  });
+  tablePanelsBound = true;
 }
 
 async function apiPost(url, body) {
@@ -1009,6 +1044,7 @@ $("login-input").addEventListener("keydown", (e) => {
 });
 $("logoff-btn").addEventListener("click", onLogout);
 $("restart-service-btn").addEventListener("click", restartService);
+setupTablePanels();
 
 // Re-fit terminal on window resize so cols/rows stay in sync.
 window.addEventListener("resize", () => {
