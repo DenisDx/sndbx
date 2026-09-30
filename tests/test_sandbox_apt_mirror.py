@@ -115,6 +115,98 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         create_command = manager._run_docker_cmd.call_args_list[0].args[0]
         self.assertEqual(create_command[create_command.index("--shm-size") + 1], "1g")
 
+    def test_recreate_rejects_changed_container_root_filesystem(self) -> None:
+        """Protect container-root settings before recreating a sandbox."""
+        manager = self._create_manager({"image": "test-image"})
+        manager._run_docker_cmd = Mock(return_value=(True, "C /etc/app.conf\n"))
+        manager.create_sandbox = Mock(return_value=(True, "created"))
+
+        success, output = manager.recreate_sandbox("test")
+
+        self.assertFalse(success)
+        self.assertIn("root filesystem has changes", output)
+        manager.create_sandbox.assert_not_called()
+
+    def test_recreate_replaces_clean_container(self) -> None:
+        """Remove and recreate only a clean container layer."""
+        manager = self._create_manager({"image": "test-image"})
+        manager._run_docker_cmd = Mock(side_effect=[(True, ""), (True, "removed")])
+        manager.create_sandbox = Mock(return_value=(True, "created"))
+
+        success, output = manager.recreate_sandbox("test")
+
+        self.assertTrue(success)
+        self.assertEqual(output, "created")
+        self.assertEqual(manager._run_docker_cmd.call_args_list[0].args[0], ["diff", "sndbx-test"])
+        self.assertEqual(manager._run_docker_cmd.call_args_list[1].args[0], ["rm", "-f", "sndbx-test"])
+        manager.create_sandbox.assert_called_once_with("test")
+
+    def test_recreate_ignores_docker_network_metadata(self) -> None:
+        """Allow only Docker-injected network files in an otherwise clean layer."""
+        manager = self._create_manager({"image": "test-image"})
+        manager._run_docker_cmd = Mock(side_effect=[
+            (True, "C /etc\nC /etc/hosts\nC /etc/hostname\nC /etc/resolv.conf\n"),
+            (True, "removed"),
+        ])
+        manager.create_sandbox = Mock(return_value=(True, "created"))
+
+        success, _ = manager.recreate_sandbox("test")
+
+        self.assertTrue(success)
+        manager.create_sandbox.assert_called_once_with("test")
+
+    def test_update_rejects_incoming_data_changes(self) -> None:
+        """Never merge image-source updates that modify protected data paths."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image_dir = root / "images" / "test-image"
+            image_dir.mkdir(parents=True)
+            (image_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+            manager = DockerSandboxManager({
+                "root": str(root),
+                "sandboxes": {"items": {"test": {
+                    "image": "test-image:latest",
+                    "local_image_id": "test-image",
+                }}},
+            })
+            manager._run_git_cmd = Mock(side_effect=[
+                (True, str(image_dir)),
+                (True, ""),
+                (True, "origin/main"),
+                (True, ""),
+                (True, "data/user-settings.json\n"),
+            ])
+            manager._build_local_image = Mock(return_value=(True, "built"))
+
+            success, output = manager.update_configured_image("test-image:latest")
+
+            self.assertFalse(success)
+            self.assertIn("protected data/", output)
+            manager._build_local_image.assert_not_called()
+
+    def test_build_configured_image_can_pull_fresh_base_images(self) -> None:
+        """Pass the Docker base-image pull option without invoking Git updates."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "images" / "test-image").mkdir(parents=True)
+            manager = DockerSandboxManager({
+                "root": str(root),
+                "sandboxes": {"items": {"test": {
+                    "image": "test-image:latest",
+                    "local_image_id": "test-image",
+                }}},
+            })
+            manager._build_local_image = Mock(return_value=(True, "built"))
+
+            success, _ = manager.build_configured_image(
+                "test-image:latest", no_cache=True, pull=True
+            )
+
+            self.assertTrue(success)
+            manager._build_local_image.assert_called_once_with(
+                "test-image", "test-image:latest", no_cache=True, pull=True
+            )
+
     def test_posix_acl_annotation_is_limited_to_kata_virtiofs(self) -> None:
         """Pass only the supported POSIX ACL VirtioFS annotation to Kata."""
         manager = self._create_manager({

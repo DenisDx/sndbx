@@ -153,20 +153,34 @@ function renderHealth(health) {
   });
 }
 
+function containerActionTooltip(action, sandboxId) {
+  const containerName = `sndbx-${sandboxId}`;
+  const commands = {
+    start: `Start the existing container.\ndocker start ${containerName}\nIf absent: docker run ... --name ${containerName}\nWarning: an existing container keeps its current image.`,
+    stop: `Stop the existing container.\ndocker stop ${containerName}\nWarning: it remains stopped until Start is selected.`,
+    restart: `Restart the existing container.\ndocker restart ${containerName}\nThen image on_system_start hook runs.\nWarning: this does not use a newly built image.`,
+    recreate: `Stop and replace the container using the currently built image.\ndocker diff ${containerName}\ndocker rm -f ${containerName}\ndocker run ... --name ${containerName}\nWarning: rootfs changes are lost. User data in mounts and volumes is not touched. Rebuild and Update are not run.`,
+    ssh_open: "Create or reuse an SSH tunnel to the container.\nsocat TCP-LISTEN:<allocated-port>,fork,reuseaddr TCP:<container-ip>:22",
+    ssh_close: "Close the SSH tunnel and release its host port.\nkill -TERM <socat-pid>\nFallback: kill -KILL <socat-pid>",
+  };
+  return commands[action] || "";
+}
+
 function vmButtons(sandboxId) {
   const mk = (label, action) =>
-    `<button onclick="runAction('${sandboxId}','${action}')">${label}</button>`;
+    `<button title="${escapeHtml(containerActionTooltip(action, sandboxId))}" onclick="runAction('${sandboxId}','${action}')">${label}</button>`;
 
   return [
     mk("Start", "start"),
     mk("Stop", "stop"),
     mk("Restart", "restart"),
+    mk("Recreate", "recreate"),
   ].join("");
 }
 
 function sshButtons(sandboxId) {
   const mk = (label, action) =>
-    `<button onclick="runAction('${sandboxId}','${action}')">${label}</button>`;
+    `<button title="${escapeHtml(containerActionTooltip(action, sandboxId))}" onclick="runAction('${sandboxId}','${action}')">${label}</button>`;
 
   return [
     mk("Open SSH", "ssh_open"),
@@ -174,13 +188,30 @@ function sshButtons(sandboxId) {
   ].join("");
 }
 
-function imageButtons(imageRef, building) {
+function imageActionTooltip(action, imageRef, imagePath) {
+  const noCache = action === "build" ? "" : " --no-cache";
+  const context = imagePath || "<local-image-directory>";
+  const buildCommand = `docker build -t ${imageRef}${noCache} --build-arg APT_MIRROR=<configured-mirror> ${context}`;
+  if (action === "build") {
+    return `Build the local image using Docker cache.\n${buildCommand}\nWarning: running containers are not changed; use Recreate afterwards to apply it.`;
+  }
+  if (action === "rebuild") {
+    return `Build the local image without Docker cache.\n${buildCommand}\nWarning: running containers are not changed; use Recreate afterwards to apply it.`;
+  }
+  if (action === "update") {
+    return `Pull fresh Docker base images, then rebuild without cache.\n${buildCommand.replace("docker build", "docker build --pull")}\nProtected: no Git command runs and data/ is not modified.\nWarning: running containers are not changed; use Recreate afterwards to apply it.`;
+  }
+  return `Fast-forward the image source, pull fresh Docker base images, then rebuild without cache.\ngit fetch --prune; git merge --ff-only <upstream>\n${buildCommand.replace("docker build", "docker build --pull")}\nProtected: data/ is never updated; dirty, divergent, or data-changing updates fail.\nWarning: running containers are not changed; use Recreate afterwards to apply it.`;
+}
+
+function imageButtons(imageRef, imagePath, building) {
   const mk = (label, action) =>
-    `<button onclick="runImageAction('${escapeHtml(imageRef)}','${action}')"${building ? " disabled" : ""}>${label}</button>`;
+    `<button title="${escapeHtml(imageActionTooltip(action, imageRef, imagePath))}" onclick="runImageAction('${escapeHtml(imageRef)}','${action}')"${building ? " disabled" : ""}>${label}</button>`;
   return [
     mk("Build", "build"),
-    mk("Rebuild", "rebuild"),
-    mk("Update", "update"),
+    mk("Build --no-cache", "rebuild"),
+    mk("Update & rebuild", "update"),
+    mk("Full update & rebuild", "full_update"),
   ].join("");
 }
 
@@ -190,7 +221,12 @@ function renderBuildStatus(image) {
   }
   const startedAt = Number(image.build_started_at || 0) * 1000;
   const elapsedSeconds = startedAt > 0 ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
-  const action = image.build_action === "build" ? "BUILDING" : "REBUILDING";
+  const action = {
+    build: "BUILDING",
+    rebuild: "BUILDING NO-CACHE",
+    update: "UPDATING",
+    full_update: "FULL UPDATING",
+  }[image.build_action] || "BUILDING";
   return `<span class="badge building">${action} ${elapsedSeconds}s</span>`;
 }
 
@@ -198,7 +234,9 @@ function autoStartButton(sandboxId, enabled) {
   const action = enabled ? "auto_start_disable" : "auto_start_enable";
   const label = enabled ? "Enabled" : "Disabled";
   const stateClass = enabled ? "enabled" : "disabled";
-  const title = enabled ? "Disable Auto-start" : "Enable Auto-start";
+  const title = enabled
+    ? "Disable automatic start at sndbx startup.\nNo shell command. Saves run_at_startup=false in data/sandbox_startup_overrides.json"
+    : "Enable automatic start at sndbx startup.\nNo shell command. Saves run_at_startup=true in data/sandbox_startup_overrides.json";
   return `<button class="autostart ${stateClass}" title="${title}" onclick="runAction('${escapeHtml(sandboxId)}','${action}')">${label}</button>`;
 }
 
@@ -259,7 +297,7 @@ function renderImages(images) {
       <td>${yesNoBadge(!!img.has_dockerfile)}</td>
       <td>${yesNoBadge(!!img.has_app_py)}</td>
       <td>${escapeHtml(refs || "—")}</td>
-      <td><div class="actions">${imageButtons(img.image || "", building)}</div></td>
+      <td><div class="actions">${imageButtons(img.image || "", img.path || "", building)}</div></td>
     `;
     body.appendChild(tr);
   });
@@ -276,7 +314,14 @@ async function runAction(sandboxId, action) {
     start: "Starting",
     stop: "Stopping",
     restart: "Restarting",
+    recreate: "Recreating",
   };
+  if (action === "recreate" && !window.confirm(
+    `Recreate sndbx-${sandboxId}?\n\nThe container root filesystem will be replaced with the currently built image. `
+    + "Configured mounts and volumes, including user data, are not modified. Rebuild and Update are not run."
+  )) {
+    return;
+  }
   const actionName = actionNames[action] || "Updating";
   setDashMessage(`${actionName} sndbx-${sandboxId}...`, true);
 
@@ -299,7 +344,26 @@ window.runAction = runAction;
 
 async function runImageAction(imageRef, action) {
   const actionName = (action || "").toLowerCase();
-  const verb = actionName === "build" ? "Build" : "Rebuild";
+  const verb = {
+    build: "Build",
+    rebuild: "Build --no-cache",
+    update: "Update & rebuild",
+    full_update: "Full update & rebuild",
+  }[actionName] || "Build";
+
+  if (actionName === "update" && !window.confirm(
+    `Update and rebuild '${imageRef}'?\n\nDocker pulls fresh base images and rebuilds without cache. `
+    + "No Git command runs and data/ is not modified. Recreate remains a separate action."
+  )) {
+    return;
+  }
+
+  if (actionName === "full_update" && !window.confirm(
+    `Update and rebuild '${imageRef}'?\n\nOnly the image source Git root is fast-forwarded. `
+    + "data/ is protected and will not be changed. Recreate remains a separate action."
+  )) {
+    return;
+  }
 
   setDashMessage(`${verb} started for image '${imageRef}'...`, false);
   appendLocalLogLine(`[webui] ${verb} started for image '${imageRef}'`);

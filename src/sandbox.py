@@ -148,19 +148,88 @@ class DockerSandboxManager:
             return False, output or 'host_prepare_script failed'
         return True, (result.stdout + result.stderr).strip()
 
-    def _build_local_image(self, local_id: str, image_ref: str, no_cache: bool = False) -> tuple[bool, str]:
-        """Build image_ref from images/<local_id>/Dockerfile."""
+    def _build_local_image(
+        self, local_id: str, image_ref: str, no_cache: bool = False, pull: bool = False
+    ) -> tuple[bool, str]:
+        """Build image_ref from images/<local_id>/Dockerfile with optional base-image pull."""
         image_dir = self.images_dir / local_id
         dockerfile = image_dir / 'Dockerfile'
         if not dockerfile.is_file():
             return False, f"Dockerfile not found: {dockerfile}"
 
         cmd = ['build', '-t', image_ref]
+        if pull:
+            cmd.append('--pull')
         if no_cache:
             cmd.append('--no-cache')
         cmd.extend(['--build-arg', f'APT_MIRROR={self.APT_MIRROR}'])
         cmd.append(str(image_dir))
         return self._run_docker_cmd(cmd, timeout=1800)
+
+    def _run_git_cmd(self, image_dir: Path, args: List[str], timeout: int = 120) -> tuple[bool, str]:
+        """Run a Git command only in the resolved image root directory."""
+        try:
+            result = subprocess.run(
+                ['git', '-C', str(image_dir), *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return result.returncode == 0, (result.stdout + result.stderr).strip()
+        except subprocess.TimeoutExpired:
+            return False, 'Git command timed out'
+        except OSError as error:
+            return False, f'could not run Git: {error}'
+
+    def update_configured_image(self, image_ref: str) -> tuple[bool, str]:
+        """Fast-forward an image source without touching data/, then rebuild it from fresh bases."""
+        local_id = self._local_image_id_for_ref(image_ref)
+        if not local_id:
+            return False, f"Local image folder not found for '{image_ref}'"
+        image_dir = (self.images_dir / local_id).resolve()
+
+        root_ok, root_output = self._run_git_cmd(image_dir, ['rev-parse', '--show-toplevel'])
+        if not root_ok:
+            return False, f"Image source is not a Git worktree: {root_output}"
+        try:
+            if Path(root_output).resolve() != image_dir:
+                return False, 'Image source Git root must be the image directory'
+        except OSError:
+            return False, 'Could not resolve image source Git root'
+
+        clean_ok, clean_output = self._run_git_cmd(image_dir, ['status', '--porcelain', '--untracked-files=all'])
+        if not clean_ok:
+            return False, f"Could not inspect image source status: {clean_output}"
+        if clean_output:
+            return False, 'Image source has local changes; Update & rebuild was cancelled'
+
+        upstream_ok, upstream_output = self._run_git_cmd(
+            image_dir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']
+        )
+        if not upstream_ok:
+            return False, 'Image source has no configured upstream branch'
+
+        fetch_ok, fetch_output = self._run_git_cmd(image_dir, ['fetch', '--prune'])
+        if not fetch_ok:
+            return False, f"Could not fetch image source updates: {fetch_output}"
+
+        protected_ok, protected_output = self._run_git_cmd(
+            image_dir, ['diff', '--name-only', f'HEAD..{upstream_output}']
+        )
+        if not protected_ok:
+            return False, f"Could not inspect incoming image source updates: {protected_output}"
+        protected_paths = [path.strip() for path in protected_output.splitlines()]
+        if any(path == 'data' or path.startswith('data/') for path in protected_paths):
+            return False, 'Incoming update modifies protected data/; Update & rebuild was cancelled'
+
+        fast_forward_ok, _ = self._run_git_cmd(image_dir, ['merge-base', '--is-ancestor', 'HEAD', upstream_output])
+        if not fast_forward_ok:
+            return False, 'Image source is not a fast-forward update; Update & rebuild was cancelled'
+
+        merge_ok, merge_output = self._run_git_cmd(image_dir, ['merge', '--ff-only', upstream_output])
+        if not merge_ok:
+            return False, f"Could not fast-forward image source: {merge_output}"
+        return self._build_local_image(local_id, image_ref, no_cache=True, pull=True)
 
     def _ensure_image_ready(self, image_ref: str) -> tuple[bool, str]:
         """Ensure image is available, auto-building local images/<id> when needed."""
@@ -668,15 +737,17 @@ class DockerSandboxManager:
             rec['sandboxes'].append(sandbox_id)
         return sorted(rows.values(), key=lambda x: x['image'])
 
-    def build_configured_image(self, image_ref: str, no_cache: bool = False) -> tuple[bool, str]:
-        """Build configured local image by ref if images/<id> exists."""
+    def build_configured_image(
+        self, image_ref: str, no_cache: bool = False, pull: bool = False
+    ) -> tuple[bool, str]:
+        """Build configured local image by ref with optional Docker base-image pull."""
         ref = str(image_ref or '').strip()
         if not ref:
             return False, 'image is required'
         local_id = self._local_image_id_for_ref(ref)
         if not local_id:
             return False, f"Local image folder not found for '{ref}'"
-        return self._build_local_image(local_id, ref, no_cache=no_cache)
+        return self._build_local_image(local_id, ref, no_cache=no_cache, pull=pull)
 
     # Aliyun mirror is fast from this host (~2.8 MB/s vs ~10 KB/s from archive.ubuntu.com).
     # Applied once at container creation; keeps indices in tmpfs so writes are in-memory.
@@ -1057,6 +1128,41 @@ pkill -x sshd || true
                 self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
                 return False, runtime_error
         return success, output
+
+    def recreate_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
+        """Recreate a sandbox only when its writable container layer is unchanged."""
+        if sandbox_id not in self.sandbox_configs:
+            return False, f"Sandbox {sandbox_id} not in configuration"
+
+        container_name = f'sndbx-{sandbox_id}'
+        exists, diff_output = self._run_docker_cmd(['diff', container_name])
+        docker_runtime_diff = {
+            'C /etc',
+            'C /etc/hosts',
+            'C /etc/hostname',
+            'C /etc/resolv.conf',
+        }
+        rootfs_changes = [
+            line for line in diff_output.splitlines()
+            if line.strip() and line.strip() not in docker_runtime_diff
+        ]
+        if exists and rootfs_changes:
+            return False, (
+                'Container root filesystem has changes; Recreate was cancelled to protect '
+                'settings. Move persistent settings into configured mounts or volumes first.'
+            )
+        if not exists and 'No such container' not in diff_output:
+            return False, f"Could not inspect container before recreate: {diff_output}"
+
+        if exists:
+            removed, remove_output = self._run_docker_cmd(['rm', '-f', container_name])
+            if not removed:
+                return False, f"Could not remove container for recreate: {remove_output}"
+
+        created, create_output = self.create_sandbox(sandbox_id)
+        if not created:
+            return False, f"Container was removed but replacement creation failed: {create_output}"
+        return True, create_output
 
     def list_sandboxes(self) -> tuple[bool, List[Dict[str, Any]]]:
         """List managed sandbox containers and their docker-level status."""

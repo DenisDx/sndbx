@@ -454,7 +454,12 @@ class WebUIServer:
 
     def _image_action_message(self, image_ref: str, action: str, ok: bool, output: str) -> str:
         """Build a concise dashboard message for image build/rebuild operations."""
-        action_name = "build" if action == "build" else "rebuild"
+        action_name = {
+            "build": "build",
+            "rebuild": "build --no-cache",
+            "update": "update & rebuild",
+            "full_update": "full update & rebuild",
+        }.get(action, action)
         if ok:
             return f"Image '{image_ref}' {action_name} completed"
 
@@ -481,7 +486,9 @@ class WebUIServer:
             images.append(row)
         return images
 
-    def _start_image_build(self, image_ref: str, action: str, no_cache: bool) -> tuple[bool, str]:
+    def _start_image_build(
+        self, image_ref: str, action: str, no_cache: bool, pull: bool = False
+    ) -> tuple[bool, str]:
         """Start one background build per image and return its accepted state."""
         with self._image_builds_lock:
             if image_ref in self._image_builds:
@@ -493,7 +500,9 @@ class WebUIServer:
 
         def build() -> None:
             try:
-                ok, output = self.sandbox_manager.build_configured_image(image_ref, no_cache=no_cache)
+                ok, output = self.sandbox_manager.build_configured_image(
+                    image_ref, no_cache=no_cache, pull=pull
+                )
                 message = self._image_action_message(image_ref, action, ok, output)
                 if ok:
                     logger.info("%s", message)
@@ -507,6 +516,33 @@ class WebUIServer:
 
         threading.Thread(target=build, name=f"image-{action}-{image_ref}", daemon=True).start()
         return True, f"Image '{image_ref}' {action} started"
+
+    def _start_full_image_update(self, image_ref: str) -> tuple[bool, str]:
+        """Fetch safe image source updates and rebuild one image in the background."""
+        with self._image_builds_lock:
+            if image_ref in self._image_builds:
+                return False, f"Image '{image_ref}' is already building"
+            self._image_builds[image_ref] = {
+                "action": "full_update",
+                "started_at": time.time(),
+            }
+
+        def update() -> None:
+            try:
+                ok, output = self.sandbox_manager.update_configured_image(image_ref)
+                message = self._image_action_message(image_ref, "full_update", ok, output)
+                if ok:
+                    logger.info("%s", message)
+                else:
+                    logger.error("%s", message)
+            except Exception:
+                logger.exception("Image '%s' full update & rebuild crashed", image_ref)
+            finally:
+                with self._image_builds_lock:
+                    self._image_builds.pop(image_ref, None)
+
+        threading.Thread(target=update, name=f"image-full-update-{image_ref}", daemon=True).start()
+        return True, f"Image '{image_ref}' full update & rebuild started"
 
     def _mcp_config_target(self) -> tuple[str, int, str]:
         """Return default MCP host, port and token from config."""
@@ -916,8 +952,14 @@ class WebUIServer:
             if action == "build":
                 ok, message = self._start_image_build(image_ref, action, no_cache=False)
                 return {"ok": ok, "message": message, "building": ok}
-            if action in ("rebuild", "update"):
+            if action == "rebuild":
                 ok, message = self._start_image_build(image_ref, "rebuild", no_cache=True)
+                return {"ok": ok, "message": message, "building": ok}
+            if action == "update":
+                ok, message = self._start_image_build(image_ref, "update", no_cache=True, pull=True)
+                return {"ok": ok, "message": message, "building": ok}
+            if action == "full_update":
+                ok, message = self._start_full_image_update(image_ref)
                 return {"ok": ok, "message": message, "building": ok}
             raise HTTPException(status_code=400, detail="Unknown image action")
 
@@ -945,6 +987,10 @@ class WebUIServer:
 
             if action == "restart":
                 ok, out = self.sandbox_manager.restart_sandbox(sandbox_id)
+                return {"ok": ok, "message": out}
+
+            if action == "recreate":
+                ok, out = self.sandbox_manager.recreate_sandbox(sandbox_id)
                 return {"ok": ok, "message": out}
 
             if action == "ssh_open":
