@@ -330,11 +330,38 @@ else
 fi
 
 # Replace placeholders with actual values
-sed -i "s|SNDBX_USER|$(whoami)|g" "$SERVICE_FILE"
+SERVICE_USER="$(whoami)"
+sed -i "s|SNDBX_USER|${SERVICE_USER}|g" "$SERVICE_FILE"
 sed -i "s|SNDBX_ROOT|${SNDBX_ROOT}|g" "$SERVICE_FILE"
 sed -i "s|SNDBX_VENV_BIN|${VENV_DIR}/bin|g" "$SERVICE_FILE"
 
 log_info "Service file created at $SERVICE_FILE"
+
+# Install the optional root-owned backup ACL helper. It is required only when
+# backups must read guest-owned files created under foreign host UIDs or GIDs.
+install_backup_acl_helper() {
+    local requested="${INSTALL_BACKUP_ACL_HELPER:-}"
+
+    if [[ -z "$requested" && -t 0 ]]; then
+        read -r -p "Install non-interactive backup ACL helper? (y/N) " requested
+    fi
+
+    if [[ "$requested" =~ ^([Yy]|[Yy][Ee][Ss]|1|true|TRUE)$ ]]; then
+        if sudo "${SNDBX_ROOT}/install_backup_acl_helper.sh" "$SERVICE_USER"; then
+            log_info "Installed non-interactive backup ACL helper"
+        else
+            log_warn "Could not install the backup ACL helper"
+            log_warn "Backups of guest-owned files will fail until it is installed"
+        fi
+    elif [[ -n "$requested" && ! "$requested" =~ ^([Nn]|[Nn][Oo]|0|false|FALSE)$ ]]; then
+        log_error "INSTALL_BACKUP_ACL_HELPER must be one of: 1, true, yes, 0, false, no"
+        exit 1
+    else
+        log_info "Skipping optional backup ACL helper"
+    fi
+}
+
+install_backup_acl_helper
 
 # Enable service
 if $USE_SYSTEM_SERVICE; then

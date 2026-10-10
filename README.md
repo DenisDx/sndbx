@@ -570,6 +570,116 @@ Lifecycle hook (`app.py`):
 
 Web UI dashboard includes a "Local images" panel with Build/Rebuild/Update buttons.
 
+### Per-VM Local Image Backups
+
+sndbx can run an internal incremental backup scheduler for local image directories. The scheduler runs inside the existing `sndbx.service` process; it does not use cron, systemd timers, Docker image export, or a separate daemon. The feature is opt-in per sandbox.
+
+When a virtual machine creates files under a different host UID or GID, install
+the non-interactive root backup helper once as an administrator:
+
+```bash
+sudo ./install_backup_acl_helper.sh <sndbx-service-user>
+```
+
+The standard installer offers this step interactively. For unattended
+installation, enable it explicitly:
+
+```bash
+INSTALL_BACKUP_ACL_HELPER=1 ./install.sh
+```
+
+It installs a root-owned helper and a sudoers rule that permits only that
+helper for the service user. The scheduler uses `sudo -n` to invoke the helper
+without a password prompt. The helper reads only the configured local image,
+writes only its configured backup directory, and maintains root-owned
+incremental snapshot state under `/var/lib/sndbx-backup/`. It never changes
+ACLs or permissions in the virtual-machine image. If provisioning is absent
+or fails, no archive is created and the error identifies the failed helper.
+
+Live backups are file-level, not application-consistent. The helper uses GNU
+tar's `--ignore-failed-read` so a file changed by a running VM does not discard
+the whole archive; a database that changes while read can be omitted or
+captured at an arbitrary point in time.
+
+Enable it in `config.json5`:
+
+```json5
+sandboxes: {
+  items: {
+    "sandbox-1": {
+      image: "demo",
+      local_image_id: "demo",
+      backup: {
+        enabled: true,
+        interval_hours: 24,
+        full_every: 7,
+      },
+    },
+  },
+},
+```
+
+| Parameter | Type | Meaning |
+|---|---:|---|
+| `enabled` | boolean | Enables the scheduler for this sandbox. Default: `false`. |
+| `interval_hours` | positive integer | Time between backup runs. |
+| `full_every` | positive integer | Create a new full backup after this many backup intervals. |
+
+The initial run always creates a full backup. Invalid backup settings are reported in the sndbx log and skipped; they must not stop the rest of sndbx.
+
+#### What gets backed up
+
+The scheduler archives the image source directory `images/<local_image_id>/`, which includes its persistent `data/` directory. It does **not** archive Docker storage under `/var/lib/docker`, Docker containers, or external bind mounts outside the image directory.
+
+For example, the Obsidian vault and `Agents_shared` are external mounts and are intentionally not included in an `Assistant` image backup.
+
+#### Archive layout
+
+Each local image gets an isolated backup directory:
+
+```text
+backup/
+  denis_obsidian_assistant/
+    denis_obsidian_assistant-2026-10-10T110000Z-full.tar.gz
+    denis_obsidian_assistant-2026-10-11T110000Z-incremental.tar.gz
+    denis_obsidian_assistant.snar
+```
+
+The directory name is `local_image_id`, not a sandbox ID or Docker image tag. This keeps the archive location stable when a sandbox ID or tag changes. Archive names use UTC timestamps and contain either `full` or `incremental`. The snapshot file (`.snar`) is private scheduler state.
+
+The scheduler does not stop a sandbox before creating an archive, so an archive is a file-level backup, not an application-consistent database snapshot.
+
+#### Restore procedure
+
+Restore must occur into an empty target directory, not over a running image directory.
+
+1. Extract the most recent required full archive together with its `.snar` file using GNU tar.
+2. Apply every incremental archive after that full archive in chronological order.
+3. Validate ownership and permissions before using the restored image.
+4. Build the image and create a new sandbox from the restored directory.
+
+The full archive and every subsequent incremental archive are required. Losing an archive breaks restoration of later changes in that chain.
+
+A typical restore:
+
+```bash
+# Stop any sandbox that uses this image and remove its container first.
+restore=/var/tmp/sndbx-restore
+mkdir -p "$restore"
+tar --extract --gzip \
+  --listed-incremental="$restore/snapshot.snar" \
+  --file="$SNDBX_ROOT/backup/<local_image_id>/<local_image_id>-<UTC>-full.tar.gz" \
+  --directory="$restore"
+for incremental in "$SNDBX_ROOT/backup/<local_image_id>/<local_image_id>-<UTC>-incremental.tar.gz"; do
+  tar --extract --gzip \
+    --listed-incremental="$restore/snapshot.snar" \
+    --file="$incremental" \
+    --directory="$restore"
+done
+# Replace the broken images/<local_image_id> tree with the restored contents
+# and rebuild the image.
+```
+
 ## Troubleshooting
 
 ### MCP Server won't start

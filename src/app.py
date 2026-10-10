@@ -16,6 +16,7 @@ from sandbox import DockerSandboxManager
 from mcp_server import MCPServer
 from tools import ToolHandlers, register_all_tools
 from webui_server import WebUIServer
+from backup import BackupManager, find_tar_binary
 
 
 class SNDBXApp:
@@ -28,6 +29,8 @@ class SNDBXApp:
         self.sandbox_manager = None
         self.mcp_server = None
         self.webui_server = None
+        self.backup_manager = None
+        self.backup_task = None
         self.logger = get_logger('core')
         self._install_exception_hooks()
 
@@ -101,9 +104,13 @@ class SNDBXApp:
                 self.mcp_server.started_event.wait(),
                 self.webui_server.started_event.wait(),
             )
+            self._init_backup_manager()
             self.logger.info("Service startup completed")
 
-            await asyncio.gather(mcp_task, webui_task)
+            tasks = [mcp_task, webui_task]
+            if self.backup_task is not None:
+                tasks.append(self.backup_task)
+            await asyncio.gather(*tasks)
         
         except Exception as e:
             self.logger.exception(f"Failed to start application: {e}")
@@ -197,9 +204,73 @@ class SNDBXApp:
         """Start initialized MCP server."""
         self.logger.info("Starting MCP server...")
         await self.mcp_server.start()
-    
+
+    def _init_backup_manager(self):
+        """Initialize the local image backup scheduler.
+
+        input: log from the current sndbx config
+        output: optional asyncio backup task assigned to self.backup_task
+        """
+        tar_binary = find_tar_binary()
+        if tar_binary is None:
+            self.logger.warning(
+                "GNU tar not found or unsupported on PATH; backup scheduler is disabled"
+            )
+            return
+        if self.sandbox_manager is None:
+            self.logger.warning("Sandbox manager not ready; backup scheduler is disabled")
+            return
+        self.backup_manager = BackupManager(
+            self.config or {},
+            self.root_dir or os.getcwd(),
+            self.sandbox_manager,
+            tar_binary=tar_binary,
+            backup_helper_path="/usr/local/libexec/sndbx-backup-helper",
+        )
+        try:
+            self.backup_manager.reconfigure()
+        except Exception as error:
+            self.logger.warning("Backup scheduler reconfigure failed: %s", error)
+            self.backup_manager = None
+            return
+        enabled = self.backup_manager.list_enabled_jobs()
+        if not enabled:
+            self.logger.info("Backup scheduler: no enabled backup jobs in config")
+            self.backup_manager.shutdown()
+            self.backup_manager = None
+            return
+        for job in enabled:
+            self.logger.info(
+                "Backup scheduler: job ready image=%s interval_hours=%d full_every=%d",
+                job.local_image_id,
+                job.settings.interval_hours,
+                job.settings.full_every,
+            )
+        self.backup_task = asyncio.create_task(
+            self.backup_manager.run_loop(), name="sndbx-backup-scheduler"
+        )
+
+    async def _stop_backup_scheduler(self):
+        """Cancel the backup scheduler task if it is running."""
+        if self.backup_task is None:
+            return
+        task = self.backup_task
+        self.backup_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            self.logger.warning("Backup scheduler stopped with error: %s", error)
+        if self.backup_manager is not None:
+            self.backup_manager.shutdown()
+            self.backup_manager = None
+
     async def stop(self):
         """Stop all services gracefully"""
+        await self._stop_backup_scheduler()
+
         if self.mcp_server:
             self.logger.info("Closing MCP server...")
             await self.mcp_server.stop()
@@ -211,7 +282,7 @@ class SNDBXApp:
         if self.sandbox_manager and self.config:
             self.logger.info("Stopping sandboxes...")
             self._stop_all_sandboxes()
-        
+
         self.logger.info("Service shutdown completed")
 
 

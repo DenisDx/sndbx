@@ -121,6 +121,15 @@
         ssh_keys: [
           "${MY_SSH_PUBLIC_KEY}"
         ],
+        // Optional daily incremental / weekly full backup of images/<local_image_id>.
+        // When `local_image_id` differs from the image name, the backup target is
+        // images/<local_image_id>/. External mounts (e.g. Obsidian, Agents_shared)
+        // are intentionally excluded. See README.md "Backup" for the restore chain.
+        // backup: {
+        //   enabled: true,
+        //   interval_hours: 24,
+        //   full_every: 7,
+        // },
         shared_directories: [
           {
             host_path: "${SNDBX_ROOT}/shared/mcp_toolbox_1/.ssh",
