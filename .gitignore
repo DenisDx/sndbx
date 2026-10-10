@@ -33,6 +33,7 @@ env/
 
 # Runtime and generated project directories
 data/
+backup/
 logs/
 shared/
 sessions/
