@@ -68,6 +68,11 @@ class DockerSandboxManager:
         ]
         return any(hint in text for hint in hints)
 
+    def _is_rootfs_unavailable(self, output: str) -> bool:
+        """Detect transient Docker rootfs unavailability after a Kata restart."""
+        text = (output or "").lower()
+        return "open /var/lib/docker/rootfs/overlayfs/" in text and "no such file or directory" in text
+
     def _is_kata_runtime_unavailable(self, output: str) -> bool:
         """Detect missing/unknown kata runtime in Docker daemon."""
         text = (output or "").lower()
@@ -699,15 +704,20 @@ class DockerSandboxManager:
         if not runtime_ok:
             return False, runtime_error
 
-        ok, out = self._run_docker_cmd([
-            'exec',
-            '--user', '0',
-            *runtime_environment_args,
-            '-e', f'SNDBX_HOOK={hook_name}',
-            '-e', f'SNDBX_CONTEXT_JSON={ctx_json}',
-            f'sndbx-{sandbox_id}',
-            'python3', '/opt/sndbx-image/app.py',
-        ], timeout=60)
+        command = [
+            'exec', '--user', '0', *runtime_environment_args,
+            '-e', f'SNDBX_HOOK={hook_name}', '-e', f'SNDBX_CONTEXT_JSON={ctx_json}',
+            f'sndbx-{sandbox_id}', 'python3', '/opt/sndbx-image/app.py',
+        ]
+        for attempt in range(6):
+            ok, out = self._run_docker_cmd(command, timeout=60)
+            if ok or not self._is_rootfs_unavailable(out) or attempt == 5:
+                break
+            logger.warning(
+                "Kata rootfs is not ready for sandbox '%s'; retrying hook in 2 seconds",
+                sandbox_id,
+            )
+            time.sleep(2)
         if not ok:
             return False, out.strip() or 'hook failed'
         return True, out.strip() or 'hook completed'
@@ -1089,7 +1099,7 @@ pkill -x sshd || true
 
     def stop_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
         """Stop a running sandbox container"""
-        success, output = self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
+        success, output = self._run_docker_cmd(['stop', '--time', '360', f'sndbx-{sandbox_id}'])
         if success:
             logger.info(f"Stopped sandbox {sandbox_id}")
         return success, output
@@ -1112,7 +1122,7 @@ pkill -x sshd || true
         if not prepare_ok:
             logger.error("Host preparation failed for sandbox '%s': %s", sandbox_id, prepare_msg)
             return False, f'host preparation failed: {prepare_msg}'
-        success, output = self._run_docker_cmd(['restart', f'sndbx-{sandbox_id}'])
+        success, output = self._run_docker_cmd(['restart', '--time', '360', f'sndbx-{sandbox_id}'])
         if success:
             logger.info(f"Restarted sandbox {sandbox_id}")
             hook_ok, hook_msg = self._run_image_hook(

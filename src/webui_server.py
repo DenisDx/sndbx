@@ -1042,6 +1042,23 @@ class WebUIServer:
         async def repair_kata_runtime(session: Dict[str, Any] = Depends(self._require_session)):
             return self._repair_kata_runtime()
 
+        def _ensure_sandbox_running(sandbox_id: str) -> bool:
+            """Ensure a configured sandbox is running before opening a console."""
+            status = self.sandbox_manager.get_status(sandbox_id)
+            if status.running:
+                return True
+            ok, output = self.sandbox_manager.start_sandbox(sandbox_id)
+            if not ok:
+                logger.error(
+                    "Could not start sandbox '%s' for console: %s",
+                    sandbox_id,
+                    output,
+                )
+                return False
+            return self.sandbox_manager.get_status(sandbox_id).running
+
+        self._ensure_sandbox_running = _ensure_sandbox_running
+
         @app.websocket("/ws/console/{sandbox_id}")
         async def ws_console(websocket: WebSocket, sandbox_id: str):
             """Interactive shell bridge to sandbox container via PTY and docker exec."""
