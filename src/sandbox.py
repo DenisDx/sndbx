@@ -1116,28 +1116,11 @@ pkill -x sshd || true
         return success, output
 
     def restart_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
-        """Restart a running sandbox container."""
-        sandbox_cfg = self.sandbox_configs.get(sandbox_id, {})
-        prepare_ok, prepare_msg = self._run_host_prepare_script(sandbox_id, sandbox_cfg)
-        if not prepare_ok:
-            logger.error("Host preparation failed for sandbox '%s': %s", sandbox_id, prepare_msg)
-            return False, f'host preparation failed: {prepare_msg}'
-        success, output = self._run_docker_cmd(['restart', '--time', '360', f'sndbx-{sandbox_id}'])
-        if success:
-            logger.info(f"Restarted sandbox {sandbox_id}")
-            hook_ok, hook_msg = self._run_image_hook(
-                sandbox_id, sandbox_cfg, hook_name='on_system_start'
-            )
-            if not hook_ok:
-                if sandbox_cfg.get('runtime_contract'):
-                    self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
-                    return False, f"image hook failed: {hook_msg}"
-                logger.warning("image hook failed on restart for sandbox '%s': %s", sandbox_id, hook_msg)
-            runtime_ok, runtime_error = self._validate_runtime_start(sandbox_id, sandbox_cfg, hook_msg)
-            if not runtime_ok:
-                self._run_docker_cmd(['stop', f'sndbx-{sandbox_id}'])
-                return False, runtime_error
-        return success, output
+        """Restart a sandbox after Docker has stopped its previous task."""
+        stopped, output = self.stop_sandbox(sandbox_id)
+        if not stopped:
+            return False, output
+        return self.start_sandbox(sandbox_id)
 
     def recreate_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
         """Recreate a sandbox only when its writable container layer is unchanged."""

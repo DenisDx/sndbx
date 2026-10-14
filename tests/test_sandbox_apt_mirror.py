@@ -155,6 +155,19 @@ class AptMirrorConfigurationTests(unittest.TestCase):
         self.assertTrue(success)
         manager.create_sandbox.assert_called_once_with("test")
 
+    def test_restart_stops_before_starting_the_sandbox(self) -> None:
+        """Avoid Docker restart races with the previous container task."""
+        manager = self._create_manager({"image": "test-image"})
+        manager.stop_sandbox = Mock(return_value=(True, "stopped"))
+        manager.start_sandbox = Mock(return_value=(True, "started"))
+
+        success, output = manager.restart_sandbox("test")
+
+        self.assertTrue(success)
+        self.assertEqual(output, "started")
+        manager.stop_sandbox.assert_called_once_with("test")
+        manager.start_sandbox.assert_called_once_with("test")
+
     def test_update_rejects_incoming_data_changes(self) -> None:
         """Never merge image-source updates that modify protected data paths."""
         with tempfile.TemporaryDirectory() as temporary:
