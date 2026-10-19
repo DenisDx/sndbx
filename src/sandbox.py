@@ -1099,7 +1099,10 @@ pkill -x sshd || true
 
     def stop_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
         """Stop a running sandbox container"""
-        success, output = self._run_docker_cmd(['stop', '--time', '360', f'sndbx-{sandbox_id}'])
+        success, output = self._run_docker_cmd(
+            ['stop', '--time', '30', f'sndbx-{sandbox_id}'],
+            timeout=60,
+        )
         if success:
             logger.info(f"Stopped sandbox {sandbox_id}")
         return success, output
