@@ -301,6 +301,13 @@
             description: "Shared memory size, for example 1g",
             env: { allowed: true },
           },
+          stop_grace_seconds: {
+            type: "int",
+            description: "Seconds Docker allows the sandbox to stop before SIGKILL",
+            minimum: 1,
+            maximum: 3600,
+            env: { allowed: true, convert: "int" },
+          },
           persistent: {
             type: "bool",
             description: "Keep sandbox data between restarts",

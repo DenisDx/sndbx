@@ -1098,13 +1098,19 @@ pkill -x sshd || true
         return success, output
 
     def stop_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
-        """Stop a running sandbox container"""
+        """Stop a running sandbox with its configured grace period."""
+        sandbox_cfg = self.sandbox_configs.get(sandbox_id, {})
+        try:
+            stop_grace_seconds = int(sandbox_cfg.get('stop_grace_seconds', 30))
+        except (TypeError, ValueError):
+            stop_grace_seconds = 30
+        stop_grace_seconds = max(1, min(stop_grace_seconds, 3600))
         success, output = self._run_docker_cmd(
-            ['stop', '--time', '30', f'sndbx-{sandbox_id}'],
-            timeout=60,
+            ['stop', '--time', str(stop_grace_seconds), f'sndbx-{sandbox_id}'],
+            timeout=stop_grace_seconds + 30,
         )
         if success:
-            logger.info(f"Stopped sandbox {sandbox_id}")
+            logger.info(f"Stopped sandbox {sandbox_id} after up to {stop_grace_seconds}s")
         return success, output
 
     def execute_command(self, sandbox_id: str, command: str) -> tuple[bool, str]:
