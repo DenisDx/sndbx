@@ -1,0 +1,229 @@
+// sndbx configuration descriptor.
+//
+// One descriptor validates the root config.json5 and every
+// images/<image-dir>/sndbx.overlay.json5 document. Overlays are partial
+// documents: every field is optional.
+//
+// Validate with config.types.json5 as typedef_sources:
+//   aiset validate-descriptor --strict (through the Python API, which accepts
+//   known_templates) or `aiset validate-document --typedef config.types.json5`.
+{
+  descriptor_version: "1.0",
+  project: "sndbx",
+  config_version: "1.0",
+  description: "sndbx root configuration and per-image sandbox overlays",
+
+  root: {
+    type: "object",
+    description: "sndbx configuration document",
+    apply: "restart",
+
+    children: {
+      version: {
+        type: "string",
+        const: "1.0",
+        read_only: true,
+        description: "Configuration schema version",
+      },
+      title: {
+        type: "string",
+        description: "Human-readable instance title",
+      },
+      instance: {
+        type: "string",
+        description: "Instance name; may be a ${VAR} placeholder",
+        env: { allowed: true },
+      },
+      root: {
+        type: "string",
+        description: "Installation root; derived from SNDBX_ROOT and read-only",
+        env: { allowed: true },
+        read_only: true,
+      },
+
+      logging: {
+        type: "object",
+        description: "Centralized logging",
+        apply: "live",
+        children: {
+          level: {
+            type: "log_level",
+            description: "Default log level",
+          },
+          timezone: {
+            type: "string",
+            description: "Log timezone: local, UTC or an IANA name",
+            env: { allowed: true },
+          },
+          levels: {
+            type: "object",
+            description: "Per-tag log levels",
+            additional_children: {
+              type: "log_level",
+              description: "Log level for one tag",
+            },
+          },
+          log_mcp_requests: {
+            type: "bool",
+            description: "Log MCP requests and responses",
+          },
+          wipe_period: {
+            type: "int",
+            description: "Seconds between log wipe runs; 0 disables wiping",
+            minimum: 0,
+            env: { allowed: true, convert: "int" },
+          },
+        },
+      },
+
+      webui: {
+        type: "object",
+        description: "Web UI server and authentication",
+        children: {
+          port: {
+            type: "int",
+            description: "Web UI listen port",
+            minimum: 1,
+            maximum: 65535,
+            env: { allowed: true, convert: "int" },
+          },
+          bind: {
+            type: "string",
+            description: "Web UI bind address",
+            env: { allowed: true },
+          },
+          auth: {
+            type: "object",
+            description: "Web UI authentication",
+            children: {
+              mode: {
+                type: "string",
+                description: "Authentication mode",
+                enum: ["login"],
+              },
+              session_ttl: {
+                type: "int",
+                description: "Session lifetime in seconds",
+                minimum: 0,
+              },
+              users: {
+                type: "array",
+                description: "Web UI users",
+                children: { type: "webui_user" },
+              },
+            },
+          },
+        },
+      },
+
+      mcp: {
+        type: "object",
+        description: "MCP server",
+        children: {
+          port: {
+            type: "int",
+            description: "MCP listen port",
+            minimum: 1,
+            maximum: 65535,
+            env: { allowed: true, convert: "int" },
+          },
+          bind: {
+            type: "string",
+            description: "MCP bind address",
+            env: { allowed: true },
+          },
+          auth: {
+            type: "object",
+            description: "MCP authentication",
+            children: {
+              mode: {
+                type: "string",
+                description: "Authentication mode",
+                enum: ["token"],
+              },
+              tokens: {
+                type: "array",
+                description: "Accepted bearer tokens",
+                secret: true,
+                children: {
+                  type: "string",
+                  description: "Bearer token; may be a ${VAR} placeholder",
+                  env: { allowed: true },
+                },
+              },
+            },
+          },
+          items: {
+            type: "array",
+            description: "Reserved for future multi-backend support",
+            children: { type: "any", description: "Backend entry" },
+          },
+        },
+      },
+
+      sandboxes: {
+        type: "object",
+        description: "Sandbox registry and overrides",
+        children: {
+          items: {
+            type: "object",
+            description: "Sandbox id -> sandbox definition",
+            additional_children: {
+              type: "sandbox",
+              description: "One sandbox definition",
+            },
+            key_pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+          },
+        },
+      },
+
+      envids: {
+        type: "object",
+        description: "Static environment identifiers; the keys are session tokens",
+        secret: true,
+        additional_children: {
+          type: "envid",
+          description: "One environment id",
+        },
+        key_pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      },
+
+      users: {
+        type: "object",
+        description: "MCP and SSH users",
+        children: {
+          items: {
+            type: "array",
+            description: "User entries",
+            children: { type: "user" },
+          },
+        },
+      },
+
+      ssh: {
+        type: "object",
+        description: "SSH access",
+        children: {
+          port_range: {
+            type: "array",
+            description: "Host ports reserved for SSH relays: [min, max]",
+            min_items: 2,
+            max_items: 2,
+            children: {
+              type: "int",
+              description: "Port number",
+              minimum: 1,
+              maximum: 65535,
+              env: { allowed: true, convert: "int" },
+            },
+          },
+          session_ttl: {
+            type: "int",
+            description: "SSH relay lifetime in seconds",
+            minimum: 0,
+          },
+        },
+      },
+    },
+  },
+}

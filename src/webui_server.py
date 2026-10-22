@@ -355,10 +355,11 @@ class MCPToolsRequest(BaseModel):
 class WebUIServer:
     """Web UI server wrapper around FastAPI/uvicorn."""
 
-    def __init__(self, root_dir: Path, config: Dict[str, Any], sandbox_manager: Any):
+    def __init__(self, root_dir: Path, config: Dict[str, Any], sandbox_manager: Any, settings: Any = None):
         self.root_dir = Path(root_dir)
         self.config = config
         self.sandbox_manager = sandbox_manager
+        self.settings = settings
 
         webui_cfg = config.get("webui", {})
         self.host = str(webui_cfg.get("bind", "127.0.0.1"))
@@ -385,12 +386,32 @@ class WebUIServer:
         """Return the persistent Auto-start override state-file path."""
         return self.root_dir / "data" / "sandbox_startup_overrides.json"
 
-    def _set_sandbox_auto_start(self, sandbox_id: str, enabled: bool) -> tuple[bool, str]:
-        """Persist and apply a sandbox Auto-start setting without rewriting JSON5."""
+    def _set_sandbox_auto_start(
+        self, sandbox_id: str, enabled: bool, session: Optional[Dict[str, Any]] = None
+    ) -> tuple[bool, str]:
+        """Persist and apply a sandbox Auto-start setting.
+
+        With the aiset backend the value is written to the root config.json5.
+        The legacy file-based path remains for the transitional backend only.
+        """
         sandboxes = self.config.get("sandboxes", {}).get("items", {})
         sandbox_cfg = sandboxes.get(sandbox_id)
         if not isinstance(sandbox_cfg, dict):
             return False, f"Sandbox '{sandbox_id}' not found"
+
+        if self.settings is not None:
+            from settings.principals import principal_from_session
+
+            try:
+                self.settings.apply_auto_start(
+                    sandbox_id, enabled, principal_from_session(session)
+                )
+            except Exception as error:
+                return False, f"Could not save Auto-start setting: {error}"
+            sandbox_cfg["run_at_startup"] = enabled
+            self.sandbox_manager.sandbox_configs[sandbox_id]["run_at_startup"] = enabled
+            state = "enabled" if enabled else "disabled"
+            return True, f"Auto-start {state} for '{sandbox_id}'"
 
         path = self._startup_overrides_path()
         try:
@@ -972,7 +993,9 @@ class WebUIServer:
             action = body.action.strip().lower()
 
             if action in ("auto_start_enable", "auto_start_disable"):
-                ok, message = self._set_sandbox_auto_start(sandbox_id, action == "auto_start_enable")
+                ok, message = self._set_sandbox_auto_start(
+                    sandbox_id, action == "auto_start_enable", session
+                )
                 return {"ok": ok, "message": message}
 
             if action == "start":
@@ -1223,6 +1246,30 @@ class WebUIServer:
             }
             result = await client.call_tool(request_obj)
             return result
+
+        if self.settings is not None:
+            from aiset.asgi import create_asgi_app
+            from settings.principals import principal_from_session
+
+            @app.get("/api/settings/documents")
+            async def settings_documents(
+                session: Dict[str, Any] = Depends(self._require_session),
+            ):
+                return {"ok": True, "documents": self.settings.document_catalog()}
+
+            async def settings_principal(scope):
+                request = Request(scope)
+                token = request.cookies.get("sndbx_session") or ""
+                return principal_from_session(self.sessions.get(token))
+
+            app.mount(
+                "/api/settings",
+                create_asgi_app(
+                    self.settings.service,
+                    base="/api/settings",
+                    principal_from_scope=settings_principal,
+                ),
+            )
 
         # Serve frontend last so API routes take priority.
         app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")

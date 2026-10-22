@@ -322,7 +322,7 @@ Web UI is served by the same core app on WEBUI_HOST:WEBUI_PORT.
 
 Implemented tabs in v1:
 - Dashboard: health checks (docker, kata, webui), managed container list, SSH port display, actions
-- Settings: placeholder page
+- Settings: root configuration and per-image overlay editor (aiset)
 - Console: xterm.js terminal with sandbox selector and connect/disconnect controls
 
 Dashboard actions:
@@ -544,6 +544,40 @@ The `config.json5` file defines sandboxes, users, and MCP settings:
   }
 }
 ```
+
+### Settings Library (aiset)
+
+Configuration is owned by the pinned [`aiset`](https://github.com/DenisDx/aiset)
+submodule at `11d8838efe9e5cc447a9211c655a431fab810e8e` (`0.1.0`). Do not edit
+files inside `aiset/` from this repository; advance the submodule instead.
+
+Two kinds of document are loaded:
+
+- `config.json5` is the root registry, the global settings and the override
+  layer.
+- `images/<image-dir>/sndbx.overlay.json5` holds the defaults for the sandboxes
+  built from that image. One file may cover several sandbox ids (for example,
+  `images/default_sandbox_1/sndbx.overlay.json5` covers `sandbox-1` and
+  `default-sandbox-1`).
+
+Merge precedence is the same as the aidir worker config: the root wins every
+conflict, objects deep-merge, and keys present only in an overlay are added.
+A root array replaces the overlay array as a whole. To let an overlay supply a
+value, remove the key from the root (an empty root array or a root `false` still
+wins).
+
+Schemas live in `config.descriptor.json5` and `config.types.json5`. Unknown keys
+are errors: update the descriptor before adding a new configuration key.
+
+The Web UI **Settings** tab edits the root and every overlay. Changes that
+require a restart are reported as `restart_required`; use the Restart button.
+Logging and Auto-start apply without a restart.
+
+`data/sandbox_startup_overrides.json` is legacy. On the first aiset start it is
+imported into `config.json5` and renamed to `.migrated`.
+
+Design: `proposal_aiset_integration.md`. Delivery status, deviations and
+remaining operational steps: `execution_aiset_integration.md`.
 
 ### Local Sandbox Images (images/<id>)
 

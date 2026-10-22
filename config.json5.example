@@ -1,3 +1,7 @@
+// Root configuration. The root is the sandbox registry and the override layer.
+// Per-image defaults live in images/<image-dir>/sndbx.overlay.json5; the host
+// merges them under this file and the root wins every conflict. To let an
+// overlay supply a key, remove it from this file.
 // sndbx main configuration (JSON5 format)
 {
   version: "1.0",

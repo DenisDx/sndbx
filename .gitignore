@@ -40,6 +40,8 @@ sessions/
 memory/
 
 # Local VM images, except the two default sandbox images.
+# The other image directories are separate Git repositories and keep their
+# own sndbx.overlay.json5; the root repository does not track them.
 images/*/
 !images/default_sandbox_1/
 !images/default_sandbox_1/**
@@ -63,3 +65,11 @@ config.json5
 config.json5.bak
 config.json5.bak.bak
 config.json5.bak.bak.bak
+config.json5.lock
+config.json5.back*
+config.json5.conflicted.*.back
+config.json5.pre-overlay.bak
+config.json5.trim.tmp
+images/*/sndbx.overlay.json5.lock
+images/*/sndbx.overlay.json5.back*
+images/*/sndbx.overlay.json5.conflicted.*.back

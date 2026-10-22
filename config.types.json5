@@ -1,0 +1,408 @@
+// sndbx descriptor type templates.
+//
+// This file is passed to aiset as `typedef_sources` together with
+// config.descriptor.json5. It is not a standalone document schema.
+{
+  descriptor_version: "1.0",
+  project: "sndbx",
+  config_version: "1.0",
+
+  root: {
+    type: "object",
+    description: "sndbx type template declarations",
+    children: {
+      log_level_template: {
+        typedef: "log_level",
+        type: "union",
+        description: "Log level as a name or a journald-style integer (0-7)",
+        env: { allowed: true, convert: "string" },
+        children_options: [
+          {
+            type: "string",
+            enum: ["trace", "debug", "info", "warning", "warn", "error", "critical", "fatal"],
+          },
+          { type: "int", minimum: 0, maximum: 7 },
+        ],
+      },
+
+      webui_user_template: {
+        typedef: "webui_user",
+        type: "object",
+        description: "Web UI login user",
+        children: {
+          login: {
+            type: "string",
+            description: "Login name",
+            env: { allowed: true },
+          },
+          password: {
+            type: "string",
+            description: "Login password; may be a ${VAR} placeholder",
+            env: { allowed: true },
+            secret: true,
+          },
+          permissions: {
+            type: "array",
+            description: "Web UI permissions; \"all\" grants every settings permission",
+            children: { type: "string", description: "Permission name" },
+          },
+        },
+      },
+
+      user_template: {
+        typedef: "user",
+        type: "object",
+        description: "MCP/SSH user",
+        children: {
+          login: {
+            type: "string",
+            description: "Login name",
+            env: { allowed: true },
+          },
+          password: {
+            type: "string",
+            description: "Password; may be a ${VAR} placeholder",
+            env: { allowed: true },
+            secret: true,
+          },
+          token: {
+            type: "string",
+            description: "API token; may be a ${VAR} placeholder",
+            env: { allowed: true },
+            secret: true,
+          },
+          envids: {
+            type: "array",
+            description: "Environment ids accepted from this user",
+            children: { type: "string", description: "Environment id" },
+          },
+        },
+      },
+
+      shared_dir_template: {
+        typedef: "shared_dir",
+        type: "object",
+        description: "Host directory or file mounted into a sandbox",
+        children: {
+          host_path: {
+            type: "string",
+            description: "Absolute host path; placeholders are allowed",
+            env: { allowed: true },
+          },
+          guest_path: {
+            type: "string",
+            description: "Mount point inside the sandbox",
+          },
+          permission: {
+            type: "string",
+            description: "Mount permission",
+            enum: ["ro", "rw"],
+          },
+          mount_type: {
+            type: "string",
+            description: "Mount type",
+            enum: ["dir", "file"],
+          },
+          source_type: {
+            type: "string",
+            description: "Host source type",
+            enum: ["directory", "file"],
+          },
+          required: {
+            type: "bool",
+            description: "Refuse to start the sandbox when the source is missing",
+          },
+          create_if_missing: {
+            type: "bool",
+            description: "Create the host directory when it is missing",
+          },
+          host_mode: {
+            type: "string",
+            description: "Optional host directory mode, for example 0777",
+          },
+        },
+      },
+
+      managed_volume_template: {
+        typedef: "managed_volume",
+        type: "object",
+        description: "Docker-managed volume mounted into a sandbox",
+        children: {
+          name: { type: "string", description: "Docker volume name" },
+          guest_path: { type: "string", description: "Mount point inside the sandbox" },
+        },
+      },
+
+      port_binding_template: {
+        typedef: "port_binding",
+        type: "object",
+        description: "Guest port published on the host",
+        children: {
+          bind_host: {
+            type: "string",
+            description: "Host bind address; placeholders are allowed",
+            env: { allowed: true },
+          },
+          vm_port: {
+            type: "int",
+            description: "Guest port",
+            minimum: 0,
+            maximum: 65535,
+            env: { allowed: true, convert: "int" },
+          },
+          publish_port: {
+            type: "int",
+            description: "Host port",
+            minimum: 0,
+            maximum: 65535,
+            env: { allowed: true, convert: "int" },
+          },
+        },
+      },
+
+      mcp_binding_template: {
+        typedef: "mcp_binding",
+        type: "object",
+        description: "MCP backend exposed by a sandbox",
+        children: {
+          backend_id: { type: "string", description: "Backend identifier" },
+          transport: {
+            type: "string",
+            description: "MCP transport",
+            enum: ["tcp-jsonl"],
+          },
+          vm_port: {
+            type: "int",
+            description: "Backend port inside the sandbox",
+            minimum: 0,
+            maximum: 65535,
+          },
+          tools: {
+            type: "array",
+            description: "Tool allowlist; * means every tool",
+            children: { type: "string", description: "Tool name or *" },
+          },
+          auth_mode: {
+            type: "string",
+            description: "Backend authentication mode",
+            enum: ["token_passthrough"],
+          },
+          startup_timeout_sec: {
+            type: "int",
+            description: "Backend startup timeout in seconds",
+            minimum: 0,
+          },
+          read_timeout_sec: {
+            type: "int",
+            description: "Backend request timeout in seconds",
+            minimum: 0,
+          },
+        },
+      },
+
+      readiness_template: {
+        typedef: "readiness",
+        type: "object",
+        description: "Sandbox readiness probe",
+        children: {
+          type: {
+            type: "string",
+            description: "Probe type",
+            enum: ["http", "tcp"],
+          },
+          url: {
+            type: "string",
+            description: "Probe URL; placeholders are allowed",
+            env: { allowed: true },
+          },
+          attempts: {
+            type: "int",
+            description: "Maximum probe attempts",
+            minimum: 1,
+          },
+          interval_seconds: {
+            type: "int",
+            description: "Delay between attempts in seconds",
+            minimum: 0,
+          },
+        },
+      },
+
+      runtime_contract_template: {
+        typedef: "runtime_contract",
+        type: "object",
+        description: "Contract between sndbx and the application inside a sandbox",
+        children: {
+          version: {
+            type: "int",
+            description: "Runtime contract version",
+            minimum: 1,
+          },
+          capability_hook: {
+            type: "bool",
+            description: "The image provides a lifecycle capability hook",
+          },
+          environment: {
+            type: "object",
+            description: "Environment variables passed to the sandbox application",
+            secret: true,
+            additional_children: {
+              type: "string",
+              description: "Environment value; placeholders are allowed",
+              env: { allowed: true },
+            },
+          },
+          readiness: {
+            type: "array",
+            description: "Readiness probes",
+            children: { type: "readiness" },
+          },
+        },
+      },
+
+      sandbox_template: {
+        typedef: "sandbox",
+        type: "object",
+        description: "One sandbox definition; every field is optional",
+        children: {
+          title: { type: "string", description: "Human-readable sandbox title" },
+          image: {
+            type: "string",
+            description: "Docker image reference; placeholders are allowed",
+            env: { allowed: true },
+          },
+          local_image_id: {
+            type: "string",
+            description: "Directory name under images/ when it differs from the image tag",
+          },
+          memory: {
+            type: "string",
+            description: "Memory limit, for example 2G",
+            env: { allowed: true },
+          },
+          cpus: {
+            type: "int",
+            description: "CPU limit",
+            minimum: 1,
+            env: { allowed: true, convert: "int" },
+          },
+          disk_max: {
+            type: "string",
+            description: "Disk limit, for example 20G",
+            env: { allowed: true },
+          },
+          network_traffic_max: {
+            type: "string",
+            description: "Traffic limit placeholder, for example 100G",
+            env: { allowed: true },
+          },
+          shm_size: {
+            type: "string",
+            description: "Shared memory size, for example 1g",
+            env: { allowed: true },
+          },
+          persistent: {
+            type: "bool",
+            description: "Keep sandbox data between restarts",
+          },
+          run_at_startup: {
+            type: "bool",
+            description: "Start this sandbox when sndbx starts; owned by the root config",
+            apply: "live",
+          },
+          read_only_rootfs: {
+            type: "bool",
+            description: "Mount the sandbox root filesystem read-only",
+          },
+          configure_apt_mirror: {
+            type: "bool",
+            description: "Configure the apt mirror inside the sandbox",
+          },
+          ssh_setup_via_image_hook: {
+            type: "bool",
+            description: "Let the image hook configure sshd",
+          },
+          virtiofs_profile: {
+            type: "string",
+            description: "Optional virtiofs profile name",
+          },
+          ssh_user: {
+            type: "string",
+            description: "User used for SSH access",
+          },
+          ssh_keys: {
+            type: "array",
+            description: "Authorized public keys; placeholders are allowed",
+            children: {
+              type: "string",
+              description: "Public key",
+              env: { allowed: true },
+            },
+          },
+          tmpfs: {
+            type: "array",
+            description: "tmpfs mounts",
+            children: { type: "string", description: "tmpfs specification" },
+          },
+          shared_directories: {
+            type: "array",
+            description: "Host directories or files mounted into the sandbox",
+            children: { type: "shared_dir" },
+          },
+          managed_volumes: {
+            type: "array",
+            description: "Docker-managed volumes",
+            children: { type: "managed_volume" },
+          },
+          port_bindings: {
+            type: "array",
+            description: "Published ports",
+            children: { type: "port_binding" },
+          },
+          mcp_bindings: {
+            type: "array",
+            description: "MCP backends exposed by the sandbox",
+            children: { type: "mcp_binding" },
+          },
+          runtime_contract: {
+            type: "runtime_contract",
+            description: "Runtime contract for the application inside the sandbox",
+          },
+          backup: {
+            type: "object",
+            description: "Per-VM image backup schedule",
+            children: {
+              enabled: { type: "bool", description: "Enable the backup job" },
+              interval_hours: {
+                type: "int",
+                description: "Hours between backups",
+                minimum: 1,
+              },
+              full_every: {
+                type: "int",
+                description: "Run a full backup every N jobs",
+                minimum: 1,
+              },
+            },
+          },
+        },
+      },
+
+      envid_template: {
+        typedef: "envid",
+        type: "object",
+        description: "Static environment identifier",
+        children: {
+          sandbox: {
+            type: "string",
+            description: "Sandbox id this environment id maps to",
+          },
+          description: {
+            type: "string",
+            description: "Human-readable description",
+          },
+        },
+      },
+    },
+  },
+}

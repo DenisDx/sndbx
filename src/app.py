@@ -31,6 +31,7 @@ class SNDBXApp:
         self.webui_server = None
         self.backup_manager = None
         self.backup_task = None
+        self.settings_runtime = None
         self.logger = get_logger('core')
         self._install_exception_hooks()
 
@@ -73,6 +74,7 @@ class SNDBXApp:
             config_data = load_config(self.root_dir)
             self.config = config_data['config']
             self.env_vars = config_data['env']
+            self.settings_runtime = config_data.get('settings')
             self._setup_logging()
             
             self.logger.info(f"Config: {self.config.get('title')}")
@@ -95,6 +97,7 @@ class SNDBXApp:
                 root_dir=self.root_dir,
                 config=self.config,
                 sandbox_manager=self.sandbox_manager,
+                settings=self.settings_runtime,
             )
             self.logger.info("Web UI server initialized")
 

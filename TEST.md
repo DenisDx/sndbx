@@ -78,7 +78,15 @@ Run the complete project regression suite:
 PYTHONPATH=src venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Expected result: all tests pass. The current suite covers:
+Expected result: all tests pass. Known pre-existing failures in this checkout:
+`test_run_creates_incremental_archive`,
+`test_full_plus_incremental_restores_changes` and
+`test_chain_metadata_records_full_and_incremental` in `tests/test_backup.py`
+reproduce at `HEAD` without the aiset changes and are unrelated to settings.
+After the live root trim, `test_settings_parity` skips (trim parity is covered by
+`test_settings_migration`).
+
+The current suite covers:
 
 - sandbox lifecycle and Docker command construction;
 - Kata runtime and virtiofs profile options;
@@ -103,6 +111,55 @@ PYTHONPATH=src venv/bin/python -m unittest tests/test_sandbox_apt_mirror.py -v
 
 When a test fails, preserve the complete output. Do not rerun a destructive
 operation against a real sandbox as a substitute for diagnosing the failure.
+
+Focused settings suites:
+
+```bash
+# Descriptor, overlay model, runtime, HTTP mount and styles
+PYTHONPATH=src venv/bin/python -m unittest \
+  tests.test_config_descriptor tests.test_settings_overlays \
+  tests.test_settings_runtime tests.test_settings_parity \
+  tests.test_settings_migration tests.test_settings_http \
+  tests.test_settings_styles -v
+```
+
+Descriptor validation (strict; typedefs are supplied through the Python API):
+
+```bash
+PYTHONPATH=src venv/bin/python - <<'PY'
+from pathlib import Path
+from settings.aiset_path import ensure_aiset
+ensure_aiset(Path("."))
+from aiset.descriptor import _collect_typedefs, parse_descriptor, validate_descriptor
+types = Path("config.types.json5").read_text()
+templates = _collect_typedefs(parse_descriptor(types))
+result = validate_descriptor(
+    Path("config.descriptor.json5").read_text(),
+    mode="strict",
+    known_templates=templates,
+)
+print("valid:", result.valid)
+for issue in result.issues:
+    print(issue.to_dict())
+PY
+```
+
+Settings acceptance in a browser:
+
+1. Open **Settings**; the document selector lists the root configuration and
+   every `images/<dir>/sndbx.overlay.json5`.
+2. Change `logging.level` in the root; Apply; confirm the new level without a
+   restart.
+3. Change a sandbox field in an overlay; Apply; expect `restart_required`; press
+   Restart.
+4. Add the same key to the root and confirm the root value wins after restart.
+5. Change Auto-start on the dashboard; confirm it is written to the root and
+   survives a restart.
+6. Request `/api/settings/assets/aiset.js` (JavaScript, 200) and a missing asset
+   (404, not the SPA).
+7. Log in without `permissions: ["all"]`; the editor is read-only and secret
+   subtrees are denied.
+
 
 ## 5. Backup Smoke Test
 

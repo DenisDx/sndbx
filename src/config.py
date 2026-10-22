@@ -1,142 +1,47 @@
 """
-Configuration loader for sndbx
-Loads and parses .env and config.json5 files
+Configuration entry point for sndbx.
+
+The aiset runtime owns parsing, validation, overlays and persistence. This
+module keeps the public ``load_config`` shape used by the application and tests.
 """
 
+from __future__ import annotations
+
 import os
-import json
-import json5 as json5_lib
-from pathlib import Path
-from typing import Dict, Any, Optional
-import re
+from typing import Any, Dict
 
 
 class ConfigError(Exception):
-    """Configuration loading error"""
-    pass
-
-
-def apply_sandbox_startup_overrides(config: Dict[str, Any], root_dir: str) -> None:
-    """Apply persisted per-sandbox Auto-start choices to the loaded config."""
-    state_path = Path(root_dir) / 'data' / 'sandbox_startup_overrides.json'
-    try:
-        overrides = json.loads(state_path.read_text(encoding='utf-8'))
-    except FileNotFoundError:
-        return
-    except (OSError, json.JSONDecodeError) as error:
-        raise ConfigError(f"Invalid sandbox startup overrides: {error}") from error
-
-    if not isinstance(overrides, dict):
-        raise ConfigError("Sandbox startup overrides must be an object")
-    sandboxes = config.get('sandboxes', {}).get('items', {})
-    for sandbox_id, enabled in overrides.items():
-        if sandbox_id in sandboxes and isinstance(enabled, bool):
-            sandboxes[sandbox_id]['run_at_startup'] = enabled
+    """Configuration loading error."""
 
 
 def load_env_file(path: str) -> Dict[str, str]:
-    """Load .env file into dictionary"""
-    env_vars = {}
+    """Load a simple KEY=VALUE .env file into a dictionary."""
+    env_vars: Dict[str, str] = {}
     if not os.path.exists(path):
         return env_vars
-    
-    with open(path, 'r') as f:
-        for line in f:
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
             line = line.strip()
-            if not line or line.startswith('#'):
+            if not line or line.startswith("#") or "=" not in line:
                 continue
-            if '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip()
-    
+            key, value = line.split("=", 1)
+            env_vars[key.strip()] = value.strip()
     return env_vars
 
 
-def expand_placeholders(value: Any, env_vars: Dict[str, str]) -> Any:
-    """Expand ${VAR:-default} and ${VAR} placeholders in config values"""
-    if not isinstance(value, str):
-        return value
-    
-    # Replace ${VAR:-default} and ${VAR}
-    def replace_var(match):
-        var_name = match.group(1)
-        default_val = match.group(2) if match.group(2) else None
-        
-        # First check environment
-        if var_name in os.environ:
-            return os.environ[var_name]
-        # Then check loaded .env vars
-        if var_name in env_vars:
-            return env_vars[var_name]
-        # Use default if provided
-        if default_val is not None:
-            return default_val
-        # Raise error if no default and not found
-        raise ConfigError(f"Placeholder ${{{var_name}}} not found in environment or .env")
-    
-    # Pattern: ${VAR} or ${VAR:-default}
-    pattern = r'\$\{([A-Z_][A-Z0-9_]*?)(?::-(.*?))?\}'
-    result = re.sub(pattern, replace_var, value)
-    return result
+def load_config(root_dir: str = ".") -> Dict[str, Any]:
+    """Load the root configuration and every per-image overlay.
 
+    Returns ``{"env": ..., "config": ..., "settings": runtime}``. The returned
+    config is the merged runtime view: the root wins every conflict, overlays
+    supply keys the root does not define.
+    """
+    from settings.runtime import get_runtime
 
-def load_config_json5(path: str, env_vars: Dict[str, str]) -> Dict[str, Any]:
-    """Load config.json5 file with placeholder expansion"""
-    if not os.path.exists(path):
-        raise ConfigError(f"Config file not found: {path}")
-    
-    with open(path, 'r') as f:
-        content = f.read()
-    
-    # Expand placeholders in the entire file before parsing
-    def replace_var(match):
-        var_name = match.group(1)
-        default_val = match.group(2) if match.group(2) else None
-        
-        # First check environment
-        if var_name in os.environ:
-            return os.environ[var_name]
-        # Then check loaded .env vars
-        if var_name in env_vars:
-            return env_vars[var_name]
-        # Use default if provided
-        if default_val is not None:
-            return default_val
-        # Raise error if no default and not found
-        raise ConfigError(f"Placeholder ${{{var_name}}} not found in environment or .env")
-    
-    # Pattern: ${VAR} or ${VAR:-default}
-    pattern = r'\$\{([A-Z_][A-Z0-9_]*?)(?::-(.*?))?\}'
-    content = re.sub(pattern, replace_var, content)
-    
-    # Parse JSON5
-    try:
-        config = json5_lib.loads(content)
-    except ValueError as e:
-        raise ConfigError(f"Invalid JSON5 in config: {e}")
-    except Exception as e:
-        raise ConfigError(f"Error parsing JSON5: {e}")
-    
-    return config
-
-
-def load_config(root_dir: str = '.') -> Dict[str, Any]:
-    """Load complete sndbx configuration"""
-    env_path = os.path.join(root_dir, '.env')
-    config_path = os.path.join(root_dir, 'config.json5')
-    
-    # Load .env first
-    env_vars = load_env_file(env_path)
-    
-    # Set SNDBX_ROOT if not present
-    if 'SNDBX_ROOT' not in env_vars:
-        env_vars['SNDBX_ROOT'] = os.path.abspath(root_dir)
-    
-    # Load config
-    config = load_config_json5(config_path, env_vars)
-    apply_sandbox_startup_overrides(config, root_dir)
-    
+    runtime = get_runtime(root_dir)
     return {
-        'env': env_vars,
-        'config': config
+        "env": runtime.env,
+        "config": runtime.config,
+        "settings": runtime,
     }

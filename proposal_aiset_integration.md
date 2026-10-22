@@ -1,9 +1,12 @@
 # Proposal: integrating `aiset` into sndbx
 
-File version 1.3.0
+File version 1.4.0
 
-Status: **plan for review, not implemented.** The `aiset` submodule has been
-added and pinned; no sndbx source file has been changed yet.
+Status: **implemented and deployed (2026-10-22).** The design below is the
+plan of record; the actual delivery, live rollout, commands, deviations and
+remaining operational notes are recorded in `execution_aiset_integration.md`.
+aiset is the only configuration backend and the service has been restarted with
+the trimmed root plus per-image overlays.
 
 Pinned revision: `11d8838efe9e5cc447a9211c655a431fab810e8e` (`11d8838`,
 "documents update + fix"), package version `0.1.0`.
@@ -639,7 +642,7 @@ against Appendix A and validated with `--strict` before phase 1 is closed.
         children: {
           items: {
             type: "object",
-            additional_children: { typedef: "sandbox" },
+            additional_children: { type: "sandbox" },
             key_pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
           },
         },
@@ -647,7 +650,7 @@ against Appendix A and validated with `--strict` before phase 1 is closed.
       envids: {
         type: "object",
         secret: true,
-        additional_children: { typedef: "envid" },
+        additional_children: { type: "envid" },
       },
     },
   },
@@ -872,15 +875,18 @@ app.mount(
     "/api/settings",
     create_asgi_app(
         self.settings.service,
-        base="",
+        base="/api/settings",
         principal_from_scope=self._settings_principal,
     ),
 )
 ```
 
-Why `base=""`: FastAPI/Starlette strips the mount prefix before the app sees
-the request, so the library must not expect the prefix again. The public URLs
-remain `/api/settings/tree`, `/api/settings/assets/aiset.js`, etc.
+Why `base="/api/settings"`: in the installed Starlette 1.0 a `Mount` keeps the
+full request path and only sets `root_path`; the aiset ASGI adapter routes on the
+full path and subtracts `base`. The public URLs are `/api/settings/tree`,
+`/api/settings/assets/aiset.js`, etc. On a framework version that strips the
+prefix before the sub-application, pass `base=""` instead. The integration test
+`tests/test_settings_http.py` exercises the actual installed stack.
 
 Mount order matters. The settings mount must be registered before the catch-all
 `/` static mount, otherwise `/api/settings/...` is served the SPA and the editor
@@ -1148,10 +1154,11 @@ Every phase is separately revertable and ends with the existing suite green.
 
 ### Phase 4 — root trim in waves
 
-- [ ] For each VM wave, use `apply_operations` to reduce the root entry to
-      `{run_at_startup: <current>}` plus any **deliberate root overrides**, and
-      move the remaining fields to its overlay (they are already there from
-      phase 2).
+- [ ] For each VM wave, reduce the root entry to `{run_at_startup: <current>}`
+      plus any **deliberate root overrides**. aiset refuses a whole-object
+      `set` that drops commented members, so the one-time migration tool edits
+      the source span of each sandbox object, validates the result and keeps a
+      `config.json5.pre-overlay.bak` backup. The runtime never does this edit.
 - [ ] A key left in the root is an override and wins over the overlay. Removing
       it from the root is how the VM takes ownership of that key.
 - [ ] Waves: langvm; then aibusiness/clawvm/denis-obsidian-assistant/
@@ -1203,31 +1210,19 @@ Add the aiset sidecars and decide overlay tracking. Aiset writes
 `config.json5.conflicted.<stamp>.back` next to the file.
 
 All image directories except `default_sandbox_1` and `mcp_toolbox_1` are
-currently ignored. If overlays for those images must be versioned, unignore the
-directories and then re-ignore their contents except the overlay:
+ignored by the root repository. During implementation it turned out that those
+directories are separate Git repositories (they contain their own `.git`), so
+unignoring them in the root would expose nested repositories and unrelated
+local files. The implemented rule is therefore:
 
-```text
-images/*
-!images/*/
-images/*/*
-!images/*/sndbx.overlay.json5
-!images/default_sandbox_1/
-!images/default_sandbox_1/**
-!images/mcp_toolbox_1/
-!images/mcp_toolbox_1/**
-```
+- `images/default_sandbox_1/sndbx.overlay.json5` and
+  `images/mcp_toolbox_1/sndbx.overlay.json5` are tracked by the root repository;
+- overlays in the other image directories are local state owned by those image
+  repositories, like `config.json5` itself.
 
-Verify the exact result with:
-
-```sh
-git check-ignore -v images/langvm/sndbx.overlay.json5
-git check-ignore -v images/langvm/config.json5
-```
-
-The first must not match; the second must match. If the team prefers overlays
-to stay local state (like `config.json5`), skip the exception and document that
-only the tracked `default_sandbox_1` and `mcp_toolbox_1` overlays ship with the
-repository.
+The root `.gitignore` keeps `images/*/` ignored except the two tracked demo
+images. Overlays for the nested repositories are present in the working tree
+but do not appear in the root repository status.
 
 ### 11.2 Documentation sweep
 

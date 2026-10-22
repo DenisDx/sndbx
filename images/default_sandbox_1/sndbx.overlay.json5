@@ -1,0 +1,70 @@
+// sndbx per-image overlay generated from the root config.
+// Sandbox ids: default-sandbox-1, sandbox-1
+// These are VM defaults. The root config wins every conflict; a root
+// array replaces this list entirely. run_at_startup is owned by the root.
+{
+  "sandboxes": {
+    "items": {
+      "sandbox-1": {
+        "title": "Default Sandbox",
+        "image": "${VM_IMAGE:-default_sandbox_1}",
+        "memory": "${VM_MEMORY:-2G}",
+        "cpus": ${VM_CPUS:-2},
+        "disk_max": "${VM_DISK_MAX:-20G}",
+        "network_traffic_max": "${VM_NETWORK_TRAFFIC_MAX:-100G}",
+        "persistent": true,
+        "ssh_keys": [],
+        "shared_directories": [
+          {
+            "host_path": "${VM_SHARED_DIR:-/tmp/sndbx-shared}",
+            "guest_path": "/mnt/shared",
+            "permission": "rw"
+          },
+          {
+            "host_path": "${SNDBX_ROOT}/shared/default_sandbox_1/.ssh",
+            "guest_path": "/root/.ssh",
+            "mount_type": "dir",
+            "permission": "rw"
+          },
+          {
+            "host_path": "${SNDBX_ROOT}/shared/default_sandbox_1/shared",
+            "guest_path": "/root/shared",
+            "permission": "rw",
+            "host_mode": "0777"
+          }
+        ]
+      },
+      "default-sandbox-1": {
+        "title": "Local image sandbox test",
+        "image": "default_sandbox_1",
+        "memory": "${VM_MEMORY:-2G}",
+        "cpus": ${VM_CPUS:-2},
+        "disk_max": "${VM_DISK_MAX:-20G}",
+        "network_traffic_max": "${VM_NETWORK_TRAFFIC_MAX:-100G}",
+        "persistent": true,
+        "ssh_keys": [
+          "${MY_SSH_PUBLIC_KEY}"
+        ],
+        "shared_directories": [
+          {
+            "host_path": "${VM_SHARED_DIR:-/tmp/sndbx-shared}/default-sandbox-1",
+            "guest_path": "/mnt/shared",
+            "permission": "rw"
+          },
+          {
+            "host_path": "${SNDBX_ROOT}/shared/default_sandbox_1/.ssh",
+            "guest_path": "/root/.ssh",
+            "mount_type": "dir",
+            "permission": "rw"
+          },
+          {
+            "host_path": "${SNDBX_ROOT}/shared/default_sandbox_1/shared",
+            "guest_path": "/root/shared",
+            "permission": "rw",
+            "host_mode": "0777"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,95 @@
+/* sndbx host theme for the aiset settings editor.
+ *
+ * Loaded after aiset.css. The palette mirrors the sndbx Web UI; the structural
+ * rules stay in aiset.css, and the editor's controls are restated here because
+ * the host reset (index.html `* { margin: 0; padding: 0 }`) reaches them.
+ */
+
+:root {
+  color-scheme: dark;
+  --aiset-surface: #1a1d27;
+  --aiset-surface-strong: #1f2331;
+  --aiset-input-bg: #0f1117;
+  --aiset-border: #2a2d3a;
+  --aiset-text: #d0d4e8;
+  --aiset-text-soft: #b8bfd8;
+  --aiset-muted: #6b7090;
+  --aiset-accent: #5b8af7;
+  --aiset-ok: #4caf86;
+  --aiset-pending: #f0a500;
+  --aiset-warn: #f0a500;
+  --aiset-err: #e05555;
+  --aiset-type-int: #4caf86;
+  --aiset-type-string: #5b8af7;
+  --aiset-type-bool: #b48ef0;
+  --aiset-type-other: #6b7090;
+  --aiset-indent: 22px;
+  --aiset-row-gap: 8px;
+  --aiset-row-pad: 3px 6px;
+}
+
+.settings-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.settings-toolbar > label {
+  font-size: 12px;
+}
+
+#settings-document {
+  min-width: 320px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.settings-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#settings-tree {
+  overflow: auto;
+  max-height: calc(100vh - 240px);
+  padding-right: 4px;
+}
+
+/* The host reset removes control padding; restore the editor's controls. */
+.aiset-tree-editor input,
+.aiset-tree-editor button,
+.aiset-tree-editor select,
+.aiset-form input,
+.aiset-form button,
+.aiset-form select {
+  padding: 4px 6px;
+  margin: 0;
+  font: inherit;
+}
+
+.aiset-tree-editor input[type="text"],
+.aiset-tree-editor input[type="number"],
+.aiset-tree-editor select {
+  background: var(--aiset-input-bg);
+  border: 1px solid var(--aiset-border);
+  border-radius: 4px;
+  color: var(--aiset-text);
+}
+
+.aiset-tree-editor .aiset-tree-toolbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 8px;
+  border-radius: 6px 6px 0 0;
+}
+
+.aiset-tree-editor .aiset-tree-status {
+  margin-top: 8px;
+}

@@ -12,6 +12,8 @@ let logPanelBound = false;
 let restartInProgress = false;
 let suppressAutoLogout = false;
 let tablePanelsBound = false;
+let settingsTree = null;
+let settingsDocumentsLoaded = false;
 
 function showScreen(name) {
   $("login-screen").style.display = name === "login" ? "flex" : "none";
@@ -38,6 +40,65 @@ function showPage(name) {
     // Resize to actual element size when tab becomes visible.
     if (fitAddon) fitAddon.fit();
   }
+
+  if (name === "settings" && !settingsDocumentsLoaded) {
+    loadSettingsDocuments();
+  }
+}
+
+function settingsDocumentNote(documentId) {
+  const note = $("settings-document-note");
+  if (!note) return;
+  note.textContent = documentId === "main"
+    ? "Keys here override the same key in the VM overlay."
+    : "VM defaults. The root config wins every key it defines.";
+}
+
+async function loadSettingsDocuments() {
+  const select = $("settings-document");
+  if (!select) return;
+  const result = await apiGet("/api/settings/documents");
+  const documents = result && result.documents ? result.documents : [];
+  select.innerHTML = "";
+  if (!documents.length) {
+    $("settings-document-note").textContent = "Settings backend is unavailable.";
+    return;
+  }
+  documents.forEach((doc) => {
+    const option = document.createElement("option");
+    option.value = doc.id;
+    option.textContent = doc.label || doc.id;
+    select.appendChild(option);
+  });
+  select.onchange = () => mountSettings(select.value);
+  settingsDocumentsLoaded = true;
+  await mountSettings(select.value || documents[0].id);
+}
+
+function mountSettings(documentId) {
+  const target = $("settings-tree");
+  if (!target) return;
+  settingsDocumentNote(documentId);
+  if (typeof aiset === "undefined" || !aiset.mountTree) {
+    target.innerHTML = '<div class="muted">Settings editor assets are not available. Check the sndbx log and reload the page.</div>';
+    return;
+  }
+  if (settingsTree) {
+    settingsTree.destroy();
+    settingsTree = null;
+  }
+  settingsTree = aiset.mountTree("#settings-tree", {
+    document: documentId,
+    apiBase: "/api/settings",
+    view: "source",
+    lifecycle: [{
+      id: "restart",
+      label: "Restart sndbx",
+      url: "/api/service/restart",
+      confirm: "Restart the service now?",
+      reloadAfter: false,
+    }],
+  });
 }
 
 function isDashboardActive() {
@@ -702,6 +763,11 @@ function doLogout() {
   clearInterval(logTimer);
   refreshTimer = null;
   logTimer = null;
+  if (settingsTree) {
+    settingsTree.destroy();
+    settingsTree = null;
+  }
+  settingsDocumentsLoaded = false;
   showScreen("login");
 }
 
