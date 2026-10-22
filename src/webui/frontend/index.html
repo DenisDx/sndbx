@@ -125,6 +125,36 @@
   .table-panel-controls button.active { border-color: var(--accent); color: var(--accent); }
   .table-region { overflow-x: auto; }
   .table-region table { min-width: 760px; }
+  #containers-panel table { table-layout: auto; width: 100%; min-width: 900px; }
+  #containers-panel col.col-monitor,
+  #containers-panel col.col-autostart,
+  #containers-panel col.col-ssh-port { width: 1%; }
+  #containers-panel col.col-vm,
+  #containers-panel col.col-ssh { width: 130px; }
+  #containers-panel th, #containers-panel td {
+    padding: 8px 6px;
+    vertical-align: top;
+    white-space: normal;
+  }
+  #containers-panel .cell-nowrap { white-space: nowrap; }
+  #containers-panel .monitor-row td { padding: 0 6px 12px; }
+  #containers-panel .sandbox-cell,
+  #containers-panel .status-cell,
+  #containers-panel .image-cell,
+  #containers-panel .ports-cell { overflow-wrap: anywhere; word-break: break-word; }
+  #containers-panel .port-list { display: flex; flex-wrap: wrap; gap: 3px 5px; }
+  #containers-panel .port-chip {
+    white-space: nowrap;
+    padding: 1px 4px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    font-size: 11px;
+  }
+  #containers-panel .autostart { min-width: 0; padding: 4px 4px; font-size: 11px; }
+  #containers-panel .monitor-switch { min-width: 0; }
+  #containers-panel .actions { gap: 4px; }
+  #containers-panel .actions button { padding: 3px 5px; font-size: 11px; }
   .table-panel.advanced .table-region {
     height: 360px;
     min-height: 180px;
@@ -134,8 +164,23 @@
     border: 1px solid var(--border);
     border-radius: 6px;
   }
-  .table-panel.advanced .table-region th,
-  .table-panel.advanced .table-region td { white-space: nowrap; }
+  #images-panel table { table-layout: auto; width: 100%; min-width: 900px; }
+  #images-panel col.col-built,
+  #images-panel col.col-build-status,
+  #images-panel col.col-dockerfile,
+  #images-panel col.col-hook { width: 1%; }
+  #images-panel col.col-actions { width: 200px; }
+  #images-panel th, #images-panel td {
+    padding: 8px 6px;
+    vertical-align: top;
+    white-space: normal;
+  }
+  #images-panel .cell-nowrap { white-space: nowrap; }
+  #images-panel .image-name-cell,
+  #images-panel .folder-cell,
+  #images-panel .used-by-cell { overflow-wrap: anywhere; word-break: break-word; }
+  #images-panel .actions { gap: 4px; }
+  #images-panel .actions button { padding: 3px 5px; font-size: 11px; }
   .table-panel.condensed .table-region,
   .table-panel.condensed #dash-message { display: none; }
   .table-panel.condensed .table-panel-header { margin-bottom: 0; }
@@ -182,29 +227,81 @@
   .monitor-switch.on { border-color: #2f6a4f; background: rgba(76, 175, 134, 0.12); color: var(--ok); }
   .monitor-switch.on:hover { border-color: var(--ok); background: rgba(76, 175, 134, 0.2); }
   .monitor-row td { padding: 0 10px 12px; border-bottom: 1px solid var(--border); background: rgba(91, 138, 247, 0.035); }
-  .monitor-detail { display: flex; flex-direction: column; gap: 9px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .monitor-detail-wrap { display: flex; flex-direction: column; gap: 2px; }
+  .monitor-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: auto;
+    min-height: 120px;
+    max-height: 90vh;
+  }
+  .monitor-detail-resizer {
+    height: 8px;
+    cursor: ns-resize;
+    touch-action: none;
+    opacity: 0.45;
+    border-radius: 4px;
+    background: repeating-linear-gradient(0deg, transparent 0 2px, var(--muted) 2px 3px);
+  }
+  .monitor-detail-resizer:hover { opacity: 0.9; }
+  body.monitor-resizing-v { cursor: ns-resize; user-select: none; }
   .monitor-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .monitor-head .monitor-source { color: var(--muted); font-size: 12px; }
-  .monitor-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-  .monitor-metric { min-width: 0; border-top: 1px solid var(--border); padding-top: 7px; }
-  .monitor-metric-head { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
-  .monitor-metric-value { margin-top: 2px; font-size: 14px; }
-  .monitor-spark { display: block; width: 100%; height: 30px; margin-top: 5px; }
+  .monitor-source { color: var(--muted); font-size: 12px; }
+  .monitor-blocks {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 3px;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .monitor-block {
+    position: relative;
+    flex: 1 1 220px;
+    min-width: 220px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 10px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(15, 17, 23, 0.35);
+  }
+  .monitor-block-resizer {
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 12px;
+    height: 12px;
+    cursor: ew-resize;
+    touch-action: none;
+    opacity: 0.55;
+    border-radius: 2px;
+    background: repeating-linear-gradient(135deg, transparent 0 2px, var(--muted) 2px 3px);
+  }
+  .monitor-block-resizer:hover { opacity: 1; }
+  body.monitor-resizing { cursor: ew-resize; user-select: none; }
+  .monitor-process-block { flex-basis: 260px; min-width: 260px; }
+  .monitor-block-title { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .monitor-metric-value { font-size: 15px; }
+  .monitor-metric-sub { color: var(--muted); font-size: 11px; line-height: 1.3; overflow-wrap: anywhere; }
+  .monitor-spark-wrap { display: flex; flex: 1 1 48px; min-height: 48px; margin-top: 2px; }
+  .monitor-spark { display: block; width: 100%; height: 100%; min-height: 0; }
   .monitor-spark .guide { stroke: var(--border); stroke-width: 0.8; }
   .monitor-spark .line { fill: none; stroke: var(--accent); stroke-width: 1.4; }
   .monitor-spark .area { fill: rgba(91, 138, 247, 0.13); stroke: none; }
   .monitor-reasons { display: flex; flex-direction: column; gap: 3px; color: var(--warn); font-size: 12px; }
   .monitor-reasons .critical { color: var(--err); }
-  .monitor-processes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .monitor-proc-title { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
   .monitor-proc-list { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
-  .monitor-proc { display: flex; justify-content: space-between; gap: 8px; }
-  .monitor-proc span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .monitor-proc span:last-child { color: var(--muted); white-space: nowrap; }
+  .monitor-proc { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+  .monitor-proc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .monitor-proc-value { color: var(--muted); white-space: nowrap; }
   .monitor-empty { color: var(--muted); font-size: 12px; }
-  @media (max-width: 760px) {
-    .monitor-metrics, .monitor-processes { grid-template-columns: 1fr; }
-  }
 
   .muted { color: var(--muted); }
   #dash-message { min-height: 20px; color: var(--warn); margin: 8px 0 0; }
@@ -438,15 +535,26 @@
         </div>
         <div class="table-region">
           <table>
+          <colgroup>
+            <col class="col-sandbox">
+            <col class="col-monitor">
+            <col class="col-autostart">
+            <col class="col-status">
+            <col class="col-image">
+            <col class="col-ports">
+            <col class="col-ssh-port">
+            <col class="col-vm">
+            <col class="col-ssh">
+          </colgroup>
           <thead>
             <tr>
               <th>Sandbox</th>
-              <th>Monitor</th>
-              <th>Auto-start</th>
+              <th class="cell-nowrap">Monitor</th>
+              <th class="cell-nowrap">Auto-start</th>
               <th>Status</th>
               <th>Image</th>
               <th>Docker ports</th>
-              <th>SSH port</th>
+              <th class="cell-nowrap">SSH port</th>
               <th>VM</th>
               <th>SSH</th>
             </tr>
@@ -466,14 +574,24 @@
         </div>
         <div class="table-region">
           <table>
+          <colgroup>
+            <col class="col-image">
+            <col class="col-folder">
+            <col class="col-built">
+            <col class="col-build-status">
+            <col class="col-dockerfile">
+            <col class="col-hook">
+            <col class="col-used-by">
+            <col class="col-actions">
+          </colgroup>
           <thead>
             <tr>
               <th>Image</th>
               <th>Local folder</th>
-              <th>Built</th>
-              <th>Build status</th>
-              <th>Dockerfile</th>
-              <th>Hook app.py</th>
+              <th class="cell-nowrap">Built</th>
+              <th class="cell-nowrap">Build status</th>
+              <th class="cell-nowrap">Dockerfile</th>
+              <th class="cell-nowrap">Hook app.py</th>
               <th>Used by</th>
               <th>Actions</th>
             </tr>

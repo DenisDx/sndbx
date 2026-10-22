@@ -17,6 +17,11 @@ let monitorInFlight = false;
 let monitorData = {};
 let monitorHost = null;
 const monitoredSandboxIds = new Set();
+const monitorBlockWidths = new Map();
+const monitorDetailHeights = new Map();
+let monitorResizeState = null;
+let monitorDetailResizeState = null;
+let monitorResizingBound = false;
 let settingsTree = null;
 let settingsDocumentsLoaded = false;
 
@@ -321,12 +326,16 @@ function buildMonitorRow(sandboxId) {
   tr.dataset.monitorRow = sandboxId;
   const td = document.createElement("td");
   td.colSpan = 9;
-  td.innerHTML = `<div class="monitor-detail" data-monitor-detail="${escapeHtml(sandboxId)}"><span class="monitor-empty">Collecting runtime data...</span></div>`;
+  td.innerHTML = `<div class="monitor-detail-wrap" data-monitor-detail-wrap="${escapeHtml(sandboxId)}">
+    <div class="monitor-detail" data-monitor-detail="${escapeHtml(sandboxId)}"><span class="monitor-empty">Collecting runtime data...</span></div>
+    <div class="monitor-detail-resizer" title="Drag to resize height"></div>
+  </div>`;
   tr.appendChild(td);
   return tr;
 }
 
 function renderContainers(containers) {
+  if (monitorResizeState || monitorDetailResizeState) return;
   const body = $("containers-body");
   body.innerHTML = "";
 
@@ -343,15 +352,15 @@ function renderContainers(containers) {
     const tr = document.createElement("tr");
     tr.dataset.containerRow = sandboxId;
     tr.innerHTML = `
-      <td>${escapeHtml(sandboxId)}</td>
-      <td>${monitorSwitch(sandboxId, monitoredSandboxIds.has(sandboxId))}</td>
-      <td>${autoStartButton(sandboxId, !!c.run_at_startup)}</td>
-      <td>${escapeHtml(c.status || "")}</td>
-      <td>${escapeHtml(c.image || "")}</td>
-      <td>${escapeHtml(c.ports || "")}</td>
-      <td>${c.ssh_port ? String(c.ssh_port) : "—"}</td>
-      <td><div class="actions">${vmButtons(sandboxId)}</div></td>
-      <td><div class="actions">${sshButtons(sandboxId)}</div></td>
+      <td class="sandbox-cell">${escapeHtml(sandboxId)}</td>
+      <td class="cell-nowrap">${monitorSwitch(sandboxId, monitoredSandboxIds.has(sandboxId))}</td>
+      <td class="cell-nowrap">${autoStartButton(sandboxId, !!c.run_at_startup)}</td>
+      <td class="status-cell">${escapeHtml(c.status || "")}</td>
+      <td class="image-cell" title="${escapeHtml(c.image || "")}">${escapeHtml(c.image || "")}</td>
+      <td class="ports-cell" title="${escapeHtml(c.ports || "")}">${formatPorts(c.ports)}</td>
+      <td class="cell-nowrap">${c.ssh_port ? String(c.ssh_port) : "—"}</td>
+      <td class="actions-cell"><div class="actions">${vmButtons(sandboxId)}</div></td>
+      <td class="actions-cell"><div class="actions">${sshButtons(sandboxId)}</div></td>
     `;
     body.appendChild(tr);
     if (monitoredSandboxIds.has(sandboxId)) {
@@ -367,6 +376,10 @@ function toggleMonitor(sandboxId) {
   if (monitoredSandboxIds.has(sandboxId)) {
     monitoredSandboxIds.delete(sandboxId);
     delete monitorData[sandboxId];
+    monitorDetailHeights.delete(sandboxId);
+    for (const key of Array.from(monitorBlockWidths.keys())) {
+      if (key.startsWith(`${sandboxId}::`)) monitorBlockWidths.delete(key);
+    }
   } else {
     monitoredSandboxIds.add(sandboxId);
     setTablePanelExpanded("containers", true);
@@ -419,7 +432,7 @@ function updateMonitorTimer() {
 }
 
 async function loadMonitoring() {
-  if (monitorInFlight || !isDashboardActive() || document.hidden || monitoredSandboxIds.size === 0) {
+  if (monitorInFlight || monitorResizeState || monitorDetailResizeState || !isDashboardActive() || document.hidden || monitoredSandboxIds.size === 0) {
     return;
   }
   monitorInFlight = true;
@@ -443,10 +456,127 @@ function monitorDetailPlaceholder() {
 }
 
 function renderMonitorDetails() {
+  setupMonitorResizing();
   document.querySelectorAll("[data-monitor-detail]").forEach((target) => {
     const sandboxId = target.dataset.monitorDetail || "";
     const row = monitorData[sandboxId];
     target.innerHTML = row ? monitorDetailHtml(row) : monitorDetailPlaceholder();
+    applyMonitorDetailHeight(target);
+    applyMonitorBlockWidths(target);
+  });
+}
+
+function monitorBlockKey(detailId, blockId) {
+  return `${detailId}::${blockId}`;
+}
+
+function applyMonitorDetailHeight(target) {
+  const sandboxId = target.dataset.monitorDetail || "";
+  const height = monitorDetailHeights.get(sandboxId);
+  if (height) {
+    target.style.height = `${height}px`;
+  }
+}
+
+function applyMonitorBlockWidths(container) {
+  const sandboxId = container.dataset.monitorDetail || "";
+  container.querySelectorAll("[data-monitor-block]").forEach((block) => {
+    const key = monitorBlockKey(sandboxId, block.dataset.monitorBlock || "");
+    const width = monitorBlockWidths.get(key);
+    if (!width) return;
+    block.style.flex = `0 0 ${width}px`;
+    block.style.width = `${width}px`;
+  });
+}
+
+function setupMonitorResizing() {
+  if (monitorResizingBound) return;
+  monitorResizingBound = true;
+
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const blockHandle = target.closest(".monitor-block-resizer");
+    if (blockHandle) {
+      const block = blockHandle.closest("[data-monitor-block]");
+      const detail = blockHandle.closest("[data-monitor-detail]");
+      if (!block || !detail) return;
+      event.preventDefault();
+      monitorResizeState = {
+        key: monitorBlockKey(detail.dataset.monitorDetail || "", block.dataset.monitorBlock || ""),
+        block,
+        startX: event.clientX,
+        startWidth: block.getBoundingClientRect().width,
+      };
+      document.body.classList.add("monitor-resizing");
+      return;
+    }
+
+    const heightHandle = target.closest(".monitor-detail-resizer");
+    if (heightHandle) {
+      const wrap = heightHandle.closest("[data-monitor-detail-wrap]");
+      const detail = wrap ? wrap.querySelector("[data-monitor-detail]") : null;
+      if (!wrap || !detail) return;
+      event.preventDefault();
+      monitorDetailResizeState = {
+        sandboxId: wrap.dataset.monitorDetailWrap || "",
+        detail,
+        startY: event.clientY,
+        startHeight: detail.getBoundingClientRect().height,
+      };
+      document.body.classList.add("monitor-resizing-v");
+    }
+  });
+
+  document.addEventListener("pointermove", (event) => {
+    if (monitorResizeState) {
+      const minWidth = monitorResizeState.block.classList.contains("monitor-process-block") ? 260 : 220;
+      const width = Math.max(minWidth, Math.min(1600, monitorResizeState.startWidth + event.clientX - monitorResizeState.startX));
+      monitorResizeState.block.style.flex = `0 0 ${width}px`;
+      monitorResizeState.block.style.width = `${width}px`;
+      monitorBlockWidths.set(monitorResizeState.key, width);
+    }
+    if (monitorDetailResizeState) {
+      const height = Math.max(120, Math.min(window.innerHeight * 0.9, monitorDetailResizeState.startHeight + event.clientY - monitorDetailResizeState.startY));
+      monitorDetailResizeState.detail.style.height = `${height}px`;
+      monitorDetailHeights.set(monitorDetailResizeState.sandboxId, height);
+    }
+  });
+
+  const finishResize = () => {
+    monitorResizeState = null;
+    monitorDetailResizeState = null;
+    document.body.classList.remove("monitor-resizing", "monitor-resizing-v");
+  };
+  document.addEventListener("pointerup", finishResize);
+  document.addEventListener("pointercancel", finishResize);
+  window.addEventListener("blur", finishResize);
+
+  document.addEventListener("dblclick", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const blockHandle = target.closest(".monitor-block-resizer");
+    if (blockHandle) {
+      const block = blockHandle.closest("[data-monitor-block]");
+      const detail = blockHandle.closest("[data-monitor-detail]");
+      if (!block || !detail) return;
+      const key = monitorBlockKey(detail.dataset.monitorDetail || "", block.dataset.monitorBlock || "");
+      monitorBlockWidths.delete(key);
+      block.style.flex = "";
+      block.style.width = "";
+      return;
+    }
+
+    const heightHandle = target.closest(".monitor-detail-resizer");
+    if (heightHandle) {
+      const wrap = heightHandle.closest("[data-monitor-detail-wrap]");
+      const detail = wrap ? wrap.querySelector("[data-monitor-detail]") : null;
+      if (!wrap || !detail) return;
+      monitorDetailHeights.delete(wrap.dataset.monitorDetailWrap || "");
+      detail.style.height = "";
+    }
   });
 }
 
@@ -468,19 +598,18 @@ function monitorDetailHtml(row) {
   const cpuSub = `${formatPct(cpu.allocated_pct)} of ${cpu.allocated_vcpus || "?"} vCPU capacity`;
   const diskSub = `writable ${formatBytes(disk.writable_bytes)}; host free ${formatPct(disk.host_free_pct)}`;
   const reasons = monitorReasonLines(row);
-  const processes = monitorProcessesHtml(row.processes);
   const source = row.health_source && row.health_source !== "none"
     ? `<span class="monitor-source">pressure source: ${escapeHtml(row.health_source)}</span>`
     : "";
   return `
     <div class="monitor-head">${monitorBadge(row)}${source}<span class="monitor-source">probe: ${escapeHtml(memory.probe || "unknown")}</span></div>
-    <div class="monitor-metrics">
-      ${monitorMetric("Memory", `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.limit_bytes)}`, memorySub, memHistory, [85, 95])}
-      ${monitorMetric("CPU", formatPct(cpu.percent), cpuSub, cpuHistory, [80, 95])}
-      ${monitorMetric("Disk", formatBytes(disk.writable_bytes), diskSub, [], [])}
+    <div class="monitor-blocks">
+      ${monitorMetric("memory", "Memory", `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.limit_bytes)}`, memorySub, memHistory, [85, 95])}
+      ${monitorMetric("cpu", "CPU", formatPct(cpu.percent), cpuSub, cpuHistory, [80, 95])}
+      ${monitorMetric("disk", "Disk", formatBytes(disk.writable_bytes), diskSub, [], [])}
+      ${monitorProcessesHtml(row.processes)}
     </div>
     ${reasons}
-    ${processes}
   `;
 }
 
@@ -547,12 +676,14 @@ function monitorReasonLines(row) {
   return items.length ? `<div class="monitor-reasons">${items.join("")}</div>` : "";
 }
 
-function monitorMetric(label, value, sub, history, guides) {
+function monitorMetric(key, label, value, sub, history, guides) {
   return `
-    <div class="monitor-metric">
-      <div class="monitor-metric-head"><span>${escapeHtml(label)}</span><span>${escapeHtml(sub)}</span></div>
+    <div class="monitor-block monitor-metric" data-monitor-block="${escapeHtml(key)}">
+      <div class="monitor-block-title">${escapeHtml(label)}</div>
       <div class="monitor-metric-value">${escapeHtml(value)}</div>
-      ${monitorSparkline(history, guides)}
+      <div class="monitor-metric-sub">${escapeHtml(sub)}</div>
+      <div class="monitor-spark-wrap">${monitorSparkline(history, guides)}</div>
+      <div class="monitor-block-resizer" title="Drag to resize width"></div>
     </div>
   `;
 }
@@ -579,23 +710,26 @@ function monitorSparkline(values, guides) {
 
 function monitorProcessesHtml(processes) {
   if (!processes) {
-    return `<div class="monitor-empty">Process list unavailable.</div>`;
+    return `<div class="monitor-block monitor-process-block" data-monitor-block="top-memory">
+      <div class="monitor-block-title">Top processes</div>
+      <span class="monitor-empty">Unavailable.</span>
+      <div class="monitor-block-resizer" title="Drag to resize width"></div>
+    </div>`;
   }
-  const renderList = (title, items) => {
+  const renderList = (key, title, items) => {
     const rows = (items || []).map((item) => `
       <div class="monitor-proc">
-        <span>${escapeHtml(String(item.name || "?"))} <span class="muted">#${escapeHtml(String(item.pid || ""))}</span></span>
-        <span>${formatBytes(item.rss_bytes)} · ${formatPct(item.cpu_pct)}</span>
+        <span class="monitor-proc-name">${escapeHtml(String(item.name || "?"))} <span class="muted">#${escapeHtml(String(item.pid || ""))}</span></span>
+        <span class="monitor-proc-value">${formatBytes(item.rss_bytes)} · ${formatPct(item.cpu_pct)}</span>
       </div>
     `).join("");
-    return `<div><div class="monitor-proc-title">${escapeHtml(title)}</div><div class="monitor-proc-list">${rows || '<span class="monitor-empty">none</span>'}</div></div>`;
-  };
-  const stale = processes.stale ? `<span class="monitor-source">stale</span>` : "";
-  return `<div class="monitor-head"><span class="monitor-source">top processes</span>${stale}</div>
-    <div class="monitor-processes">
-      ${renderList("By memory", processes.top_memory)}
-      ${renderList("By CPU", processes.top_cpu)}
+    return `<div class="monitor-block monitor-process-block" data-monitor-block="${escapeHtml(key)}">
+      <div class="monitor-block-title">${escapeHtml(title)}${processes.stale ? ' <span class="monitor-source">stale</span>' : ""}</div>
+      <div class="monitor-proc-list">${rows || '<span class="monitor-empty">none</span>'}</div>
+      <div class="monitor-block-resizer" title="Drag to resize width"></div>
     </div>`;
+  };
+  return renderList("top-memory", "Top by memory", processes.top_memory) + renderList("top-cpu", "Top by CPU", processes.top_cpu);
 }
 
 function formatBytes(value) {
@@ -615,6 +749,18 @@ function formatBytes(value) {
 function formatPct(value) {
   const number = Number(value);
   return Number.isFinite(number) ? `${number.toFixed(1)}%` : "—";
+}
+
+function formatPorts(ports) {
+  const text = String(ports || "").trim();
+  if (!text) return `<span class="muted">—</span>`;
+  const chips = text.split(",").map((part) => part.trim()).filter(Boolean).map((part) => {
+    const display = part
+      .replace(/^(?:\[[^\]]+\]|[0-9.]+|:+):/, "")
+      .replace("->", " → ");
+    return `<span class="port-chip">${escapeHtml(display)}</span>`;
+  });
+  return `<div class="port-list">${chips.join("")}</div>`;
 }
 
 function yesNoBadge(flag) {
@@ -640,14 +786,14 @@ function renderImages(images) {
     const refs = Array.isArray(img.sandboxes) ? img.sandboxes.join(", ") : "";
     const building = img.build_status === "building";
     tr.innerHTML = `
-      <td>${escapeHtml(img.image || "")}</td>
-      <td>${escapeHtml(img.path || "—")}</td>
-      <td>${yesNoBadge(!!img.built)}</td>
-      <td>${renderBuildStatus(img)}</td>
-      <td>${yesNoBadge(!!img.has_dockerfile)}</td>
-      <td>${yesNoBadge(!!img.has_app_py)}</td>
-      <td>${escapeHtml(refs || "—")}</td>
-      <td><div class="actions">${imageButtons(img.image || "", img.path || "", building)}</div></td>
+      <td class="image-name-cell" title="${escapeHtml(img.image || "")}">${escapeHtml(img.image || "")}</td>
+      <td class="folder-cell" title="${escapeHtml(img.path || "—")}">${escapeHtml(img.path || "—")}</td>
+      <td class="cell-nowrap">${yesNoBadge(!!img.built)}</td>
+      <td class="cell-nowrap">${renderBuildStatus(img)}</td>
+      <td class="cell-nowrap">${yesNoBadge(!!img.has_dockerfile)}</td>
+      <td class="cell-nowrap">${yesNoBadge(!!img.has_app_py)}</td>
+      <td class="used-by-cell">${escapeHtml(refs || "—")}</td>
+      <td class="actions-cell"><div class="actions">${imageButtons(img.image || "", img.path || "", building)}</div></td>
     `;
     body.appendChild(tr);
   });
@@ -1061,6 +1207,10 @@ function doLogout() {
   monitoredSandboxIds.clear();
   monitorData = {};
   monitorHost = null;
+  monitorBlockWidths.clear();
+  monitorDetailHeights.clear();
+  monitorResizeState = null;
+  monitorDetailResizeState = null;
   if (settingsTree) {
     settingsTree.destroy();
     settingsTree = null;

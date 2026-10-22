@@ -336,6 +336,11 @@ Dashboard runtime monitoring:
 - While monitoring is on and the Dashboard is visible, sndbx displays memory,
   CPU, host disk information, a health badge, and a 10-minute in-memory
   history. Data is sampled every 5 seconds through `docker stats`.
+- Monitor details are equal-height blocks arranged horizontally: Memory, CPU,
+  Disk, top processes by memory, and top processes by CPU. The strip scrolls
+  horizontally when the window is too narrow for all blocks. Drag the bottom
+  handle to change the detail height; drag a block's lower-right handle to
+  change its width. Double-click a width handle to reset it.
 - A read-only `docker exec` probe runs every 15 seconds for each monitored VM.
   It reads `MemAvailable`, OOM counters, swap, uptime, and the top five
   processes by memory and CPU. Process names are shown; command arguments are

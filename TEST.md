@@ -146,19 +146,22 @@ on a production VM.
    the card grows without breaking the table.
 3. Compare the memory and CPU values with `docker stats` and with `free -m`
    inside the guest.
-4. Run a bounded memory workload inside the disposable VM and verify that the
+4. Drag the detail height handle and a block width handle. Confirm that the
+   sizes survive subsequent monitoring polls; double-click a width handle to
+   reset that block.
+5. Run a bounded memory workload inside the disposable VM and verify that the
    memory graph rises, then shows a warning after two low-availability samples.
    A critical condition appears immediately below 10 % `MemAvailable`.
-5. If the disposable VM is safe to lose, trigger a small OOM and confirm the
+6. If the disposable VM is safe to lose, trigger a small OOM and confirm the
    `OOM` badge and the guest OOM counter. Never do this on a production VM.
-6. Run a bounded CPU workload and verify the CPU graph and the `CPU` badge.
-7. Turn the switch off and confirm that `/api/monitor` requests stop in the
+7. Run a bounded CPU workload and verify the CPU graph and the `CPU` badge.
+8. Turn the switch off and confirm that `/api/monitor` requests stop in the
    browser network panel.
-8. Hide the browser tab and confirm that polling pauses; show it again and
+9. Hide the browser tab and confirm that polling pauses; show it again and
    confirm that it resumes.
-9. Stop the VM. The detail row must show `not running`; start it and confirm
-   that collection resumes.
-10. Open two authenticated dashboards and confirm that both use the same
+10. Stop the VM. The detail row must show `not running`; start it and confirm
+    that collection resumes.
+11. Open two authenticated dashboards and confirm that both use the same
     backend response cache rather than multiplying Docker calls.
 
 Descriptor validation (strict; typedefs are supplied through the Python API):
