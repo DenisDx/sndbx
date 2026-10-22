@@ -41,6 +41,7 @@ describe the root sndbx repository.
 | Document | Purpose |
 |---|---|
 | `proposal_backup.md` | Per-VM backup design. |
+| `proposal_monitoring.md` | Implemented per-VM runtime monitoring: Docker stats, guest memory/OOM probe, dashboard switches, thresholds and limitations. |
 | `proposal_clawvm.md` | ClawVM sandbox design and migration. |
 | `proposal_langvm_update.md` | LangVM image update procedure. |
 | `proposal_update_2.md` | Earlier update plan. |

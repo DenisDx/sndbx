@@ -321,13 +321,34 @@ Web UI is served by the same core app on WEBUI_HOST:WEBUI_PORT.
 - Session files: sessions/<sha256(token)>.json
 
 Implemented tabs in v1:
-- Dashboard: health checks (docker, kata, webui), managed container list, SSH port display, actions
+- Dashboard: health checks (docker, kata, webui), managed container list, SSH port display, actions, per-VM runtime monitoring
 - Settings: root configuration and per-image overlay editor (aiset)
 - Console: xterm.js terminal with sandbox selector and connect/disconnect controls
 
 Dashboard actions:
 - Start / Stop / Restart sandbox container
 - Open SSH / Close SSH (port reservation from configured ssh.port_range)
+
+Dashboard runtime monitoring:
+- Each container row has an independent **Monitor** switch. All switches are
+  off when the page is opened; no metrics are collected until the user enables
+  one. The selection is not persisted across page reloads.
+- While monitoring is on and the Dashboard is visible, sndbx displays memory,
+  CPU, host disk information, a health badge, and a 10-minute in-memory
+  history. Data is sampled every 5 seconds through `docker stats`.
+- A read-only `docker exec` probe runs every 15 seconds for each monitored VM.
+  It reads `MemAvailable`, OOM counters, swap, uptime, and the top five
+  processes by memory and CPU. Process names are shown; command arguments are
+  not collected.
+- Guest memory pressure and host memory pressure are reported separately, so a
+  VM with a too-small memory allocation can be distinguished from a host-wide
+  shortage.
+- Monitoring stores metrics only in memory. It has no background sampler, no
+  log entries, no browser notifications, and no persistent history.
+- The endpoint is authenticated `GET /api/monitor?ids=<sandbox-id>,...`.
+- Disk monitoring is best effort: it shows host free space and the Docker
+  writable-layer size (`SizeRw`). Under the current Kata/VirtioFS setup, a
+  reliable per-VM disk percentage or `disk_max` quota is not exposed.
 
 Console transport:
 - Frontend: xterm.js

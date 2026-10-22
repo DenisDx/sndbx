@@ -12,6 +12,11 @@ let logPanelBound = false;
 let restartInProgress = false;
 let suppressAutoLogout = false;
 let tablePanelsBound = false;
+let monitorTimer = null;
+let monitorInFlight = false;
+let monitorData = {};
+let monitorHost = null;
+const monitoredSandboxIds = new Set();
 let settingsTree = null;
 let settingsDocumentsLoaded = false;
 
@@ -29,10 +34,13 @@ function showPage(name) {
   if (name === "dashboard") {
     setupLogPanel();
     updateLogTimer();
+    updateMonitorTimer();
     loadSystemLog();
   } else {
     clearInterval(logTimer);
     logTimer = null;
+    clearInterval(monitorTimer);
+    monitorTimer = null;
   }
 
   if (name === "console") {
@@ -301,31 +309,312 @@ function autoStartButton(sandboxId, enabled) {
   return `<button class="autostart ${stateClass}" title="${title}" onclick="runAction('${escapeHtml(sandboxId)}','${action}')">${label}</button>`;
 }
 
+function monitorSwitch(sandboxId, enabled) {
+  const state = enabled ? "on" : "off";
+  const label = enabled ? "On" : "Off";
+  return `<button class="monitor-switch ${state}" data-monitor-toggle="${escapeHtml(sandboxId)}" aria-pressed="${enabled ? "true" : "false"}" onclick="toggleMonitor('${escapeHtml(sandboxId)}')">${label}</button>`;
+}
+
+function buildMonitorRow(sandboxId) {
+  const tr = document.createElement("tr");
+  tr.className = "monitor-row";
+  tr.dataset.monitorRow = sandboxId;
+  const td = document.createElement("td");
+  td.colSpan = 9;
+  td.innerHTML = `<div class="monitor-detail" data-monitor-detail="${escapeHtml(sandboxId)}"><span class="monitor-empty">Collecting runtime data...</span></div>`;
+  tr.appendChild(td);
+  return tr;
+}
+
 function renderContainers(containers) {
   const body = $("containers-body");
   body.innerHTML = "";
 
   if (!containers || containers.length === 0) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="8" class="muted">No managed containers found</td>`;
+    tr.innerHTML = `<td colspan="9" class="muted">No managed containers found</td>`;
     body.appendChild(tr);
+    updateMonitorPanelState();
     return;
   }
 
   containers.forEach((c) => {
+    const sandboxId = c.sandbox_id || "";
     const tr = document.createElement("tr");
+    tr.dataset.containerRow = sandboxId;
     tr.innerHTML = `
-      <td>${escapeHtml(c.sandbox_id || "")}</td>
-      <td>${autoStartButton(c.sandbox_id || "", !!c.run_at_startup)}</td>
+      <td>${escapeHtml(sandboxId)}</td>
+      <td>${monitorSwitch(sandboxId, monitoredSandboxIds.has(sandboxId))}</td>
+      <td>${autoStartButton(sandboxId, !!c.run_at_startup)}</td>
       <td>${escapeHtml(c.status || "")}</td>
       <td>${escapeHtml(c.image || "")}</td>
       <td>${escapeHtml(c.ports || "")}</td>
       <td>${c.ssh_port ? String(c.ssh_port) : "—"}</td>
-      <td><div class="actions">${vmButtons(c.sandbox_id || "")}</div></td>
-      <td><div class="actions">${sshButtons(c.sandbox_id || "")}</div></td>
+      <td><div class="actions">${vmButtons(sandboxId)}</div></td>
+      <td><div class="actions">${sshButtons(sandboxId)}</div></td>
     `;
     body.appendChild(tr);
+    if (monitoredSandboxIds.has(sandboxId)) {
+      body.appendChild(buildMonitorRow(sandboxId));
+    }
   });
+  updateMonitorPanelState();
+  renderMonitorDetails();
+}
+
+function toggleMonitor(sandboxId) {
+  if (!sandboxId) return;
+  if (monitoredSandboxIds.has(sandboxId)) {
+    monitoredSandboxIds.delete(sandboxId);
+    delete monitorData[sandboxId];
+  } else {
+    monitoredSandboxIds.add(sandboxId);
+    setTablePanelExpanded("containers", true);
+  }
+  document.querySelectorAll("[data-monitor-toggle]").forEach((button) => {
+    if (button.dataset.monitorToggle !== sandboxId) return;
+    const on = monitoredSandboxIds.has(sandboxId);
+    button.classList.toggle("on", on);
+    button.classList.toggle("off", !on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+    button.textContent = on ? "On" : "Off";
+  });
+  syncMonitorRows();
+  updateMonitorPanelState();
+  updateMonitorTimer();
+  renderMonitorDetails();
+}
+window.toggleMonitor = toggleMonitor;
+
+function syncMonitorRows() {
+  document.querySelectorAll("[data-monitor-row]").forEach((row) => {
+    if (!monitoredSandboxIds.has(row.dataset.monitorRow || "")) {
+      row.remove();
+    }
+  });
+  document.querySelectorAll("[data-container-row]").forEach((row) => {
+    const sandboxId = row.dataset.containerRow || "";
+    if (!monitoredSandboxIds.has(sandboxId)) return;
+    const next = row.nextElementSibling;
+    if (!next || next.dataset.monitorRow !== sandboxId) {
+      row.insertAdjacentElement("afterend", buildMonitorRow(sandboxId));
+    }
+  });
+}
+
+function updateMonitorPanelState() {
+  const panel = $("containers-panel");
+  if (!panel) return;
+  panel.classList.toggle("monitoring", monitoredSandboxIds.size > 0);
+}
+
+function updateMonitorTimer() {
+  clearInterval(monitorTimer);
+  monitorTimer = null;
+  if (!isDashboardActive() || document.hidden || monitoredSandboxIds.size === 0) {
+    return;
+  }
+  loadMonitoring();
+  monitorTimer = setInterval(loadMonitoring, 5000);
+}
+
+async function loadMonitoring() {
+  if (monitorInFlight || !isDashboardActive() || document.hidden || monitoredSandboxIds.size === 0) {
+    return;
+  }
+  monitorInFlight = true;
+  try {
+    const ids = Array.from(monitoredSandboxIds).join(",");
+    const data = await apiGet(`/api/monitor?ids=${encodeURIComponent(ids)}`);
+    if (data && data.sandboxes) {
+      monitorHost = data.host || null;
+      Object.entries(data.sandboxes).forEach(([sandboxId, row]) => {
+        monitorData[sandboxId] = row;
+      });
+      renderMonitorDetails();
+    }
+  } finally {
+    monitorInFlight = false;
+  }
+}
+
+function monitorDetailPlaceholder() {
+  return `<span class="monitor-empty">Collecting runtime data...</span>`;
+}
+
+function renderMonitorDetails() {
+  document.querySelectorAll("[data-monitor-detail]").forEach((target) => {
+    const sandboxId = target.dataset.monitorDetail || "";
+    const row = monitorData[sandboxId];
+    target.innerHTML = row ? monitorDetailHtml(row) : monitorDetailPlaceholder();
+  });
+}
+
+function monitorDetailHtml(row) {
+  if (!row.running) {
+    const reason = escapeHtml(row.error || "not running");
+    return `<div class="monitor-head"><span class="badge">N/A</span><span class="monitor-source">${reason}</span></div>`;
+  }
+  const memory = row.memory || {};
+  const cpu = row.cpu || {};
+  const disk = row.disk || {};
+  const history = Array.isArray(row.history) ? row.history : [];
+  const memHistory = history.map((item) => item.mem_pct);
+  const cpuHistory = history.map((item) => item.cpu_pct);
+  const available = memory.available_pct == null
+    ? "guest availability unavailable"
+    : `available ${formatPct(memory.available_pct)} (${formatBytes(memory.available_bytes)})`;
+  const memorySub = `${formatPct(memory.used_pct)} of limit; ${available}`;
+  const cpuSub = `${formatPct(cpu.allocated_pct)} of ${cpu.allocated_vcpus || "?"} vCPU capacity`;
+  const diskSub = `writable ${formatBytes(disk.writable_bytes)}; host free ${formatPct(disk.host_free_pct)}`;
+  const reasons = monitorReasonLines(row);
+  const processes = monitorProcessesHtml(row.processes);
+  const source = row.health_source && row.health_source !== "none"
+    ? `<span class="monitor-source">pressure source: ${escapeHtml(row.health_source)}</span>`
+    : "";
+  return `
+    <div class="monitor-head">${monitorBadge(row)}${source}<span class="monitor-source">probe: ${escapeHtml(memory.probe || "unknown")}</span></div>
+    <div class="monitor-metrics">
+      ${monitorMetric("Memory", `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.limit_bytes)}`, memorySub, memHistory, [85, 95])}
+      ${monitorMetric("CPU", formatPct(cpu.percent), cpuSub, cpuHistory, [80, 95])}
+      ${monitorMetric("Disk", formatBytes(disk.writable_bytes), diskSub, [], [])}
+    </div>
+    ${reasons}
+    ${processes}
+  `;
+}
+
+function monitorBadge(row) {
+  const reasons = new Set(row.reasons || []);
+  const hostReasons = new Set((monitorHost && monitorHost.reasons) || []);
+  const hostStatus = (monitorHost && monitorHost.status) || "unknown";
+  let status = row.status || "unknown";
+  if (hostStatus === "critical" || (hostStatus === "warn" && status === "ok")) {
+    status = hostStatus;
+  }
+  let label = "OK";
+  if (status === "unknown") {
+    label = "N/A";
+  } else if (reasons.has("guest_oom_kill")) {
+    label = "OOM";
+  } else if (reasons.has("guest_memory_available_low") || reasons.has("guest_memory_used_high") || reasons.has("guest_swap_used")) {
+    label = "MEM";
+  } else if (reasons.has("cpu_saturated") || reasons.has("cpu_pressure")) {
+    label = "CPU";
+  } else if (reasons.has("host_disk_low")) {
+    label = "DISK";
+  } else if (hostReasons.has("host_memory_low") || hostReasons.has("host_swap_used")) {
+    label = "HOST";
+  } else if (reasons.has("guest_probe_failed") || reasons.has("guest_probe_stale")) {
+    label = "PARTIAL";
+  } else if (status === "critical") {
+    label = "CRIT";
+  } else if (status === "warn") {
+    label = "WARN";
+  }
+  let css = status === "critical" ? "bad" : (status === "warn" ? "warn" : (status === "ok" ? "ok" : ""));
+  if (label === "PARTIAL" && css === "ok") css = "warn";
+  return `<span class="badge ${css}">${label}</span>`;
+}
+
+function monitorReasonLines(row) {
+  const labels = {
+    guest_memory_available_low: "Guest memory is low; increase this VM's memory allocation.",
+    guest_memory_used_high: "Guest memory usage is high.",
+    guest_swap_used: "Guest is using swap.",
+    guest_oom_kill: "Guest reported an OOM kill since boot.",
+    host_memory_low: "Host memory is low; this may affect several VMs.",
+    host_swap_used: "Host is using swap.",
+    cpu_saturated: "CPU is close to the allocated capacity.",
+    cpu_pressure: "Guest CPU pressure is elevated.",
+    host_disk_low: "Host filesystem is low on free space.",
+    guest_probe_failed: "Guest probe failed; only Docker-level data is available.",
+    guest_probe_stale: "Guest probe data is stale.",
+  };
+  const items = [];
+  (row.reasons || []).forEach((code) => {
+    if (!labels[code]) return;
+    const critical = row.status === "critical" && code !== "guest_probe_failed" && code !== "guest_probe_stale";
+    const extra = code === "guest_oom_kill" && row.memory && row.memory.oom_kill_total != null
+      ? ` (${row.memory.oom_kill_total} total)`
+      : "";
+    items.push(`<div class="${critical ? "critical" : ""}">${escapeHtml(labels[code] + extra)}</div>`);
+  });
+  (monitorHost && monitorHost.reasons || []).forEach((code) => {
+    if (!labels[code]) return;
+    items.push(`<div class="${monitorHost.status === "critical" ? "critical" : ""}">Host: ${escapeHtml(labels[code])}</div>`);
+  });
+  return items.length ? `<div class="monitor-reasons">${items.join("")}</div>` : "";
+}
+
+function monitorMetric(label, value, sub, history, guides) {
+  return `
+    <div class="monitor-metric">
+      <div class="monitor-metric-head"><span>${escapeHtml(label)}</span><span>${escapeHtml(sub)}</span></div>
+      <div class="monitor-metric-value">${escapeHtml(value)}</div>
+      ${monitorSparkline(history, guides)}
+    </div>
+  `;
+}
+
+function monitorSparkline(values, guides) {
+  const width = 96;
+  const height = 26;
+  const clean = (values || []).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  const guideLines = (guides || []).map((guide) => {
+    const y = height - 1 - Math.max(0, Math.min(100, guide)) / 100 * (height - 2);
+    return `<line class="guide" x1="0" y1="${y.toFixed(2)}" x2="${width}" y2="${y.toFixed(2)}"></line>`;
+  }).join("");
+  if (!clean.length) {
+    return `<svg class="monitor-spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">${guideLines}</svg>`;
+  }
+  const points = clean.map((value, index) => {
+    const x = clean.length === 1 ? width / 2 : index / (clean.length - 1) * width;
+    const y = height - 1 - Math.max(0, Math.min(100, value)) / 100 * (height - 2);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  const area = `0,${height} ${points.join(" ")} ${width},${height}`;
+  return `<svg class="monitor-spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">${guideLines}<polygon class="area" points="${area}"></polygon><polyline class="line" points="${points.join(" ")}"></polyline></svg>`;
+}
+
+function monitorProcessesHtml(processes) {
+  if (!processes) {
+    return `<div class="monitor-empty">Process list unavailable.</div>`;
+  }
+  const renderList = (title, items) => {
+    const rows = (items || []).map((item) => `
+      <div class="monitor-proc">
+        <span>${escapeHtml(String(item.name || "?"))} <span class="muted">#${escapeHtml(String(item.pid || ""))}</span></span>
+        <span>${formatBytes(item.rss_bytes)} · ${formatPct(item.cpu_pct)}</span>
+      </div>
+    `).join("");
+    return `<div><div class="monitor-proc-title">${escapeHtml(title)}</div><div class="monitor-proc-list">${rows || '<span class="monitor-empty">none</span>'}</div></div>`;
+  };
+  const stale = processes.stale ? `<span class="monitor-source">stale</span>` : "";
+  return `<div class="monitor-head"><span class="monitor-source">top processes</span>${stale}</div>
+    <div class="monitor-processes">
+      ${renderList("By memory", processes.top_memory)}
+      ${renderList("By CPU", processes.top_cpu)}
+    </div>`;
+}
+
+function formatBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let size = number;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  const digits = unit === 0 ? 0 : (size >= 100 ? 0 : (size >= 10 ? 1 : 2));
+  return `${size.toFixed(digits)} ${units[unit]}`;
+}
+
+function formatPct(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(1)}%` : "—";
 }
 
 function yesNoBadge(flag) {
@@ -475,6 +764,8 @@ async function restartService() {
 
   clearInterval(refreshTimer);
   refreshTimer = null;
+  clearInterval(monitorTimer);
+  monitorTimer = null;
 
   const reconnectDeadlineMs = Date.now() + 90_000;
   let online = false;
@@ -526,6 +817,7 @@ async function restartService() {
   setDashMessage("Service restarted successfully", true);
   appendLocalLogLine("[webui] Service restarted successfully");
   refreshTimer = setInterval(loadDashboard, 3000);
+  updateMonitorTimer();
   if (isDashboardActive()) {
     loadSystemLog();
   }
@@ -761,8 +1053,14 @@ function doLogout() {
   disconnectConsole();
   clearInterval(refreshTimer);
   clearInterval(logTimer);
+  clearInterval(monitorTimer);
   refreshTimer = null;
   logTimer = null;
+  monitorTimer = null;
+  monitorInFlight = false;
+  monitoredSandboxIds.clear();
+  monitorData = {};
+  monitorHost = null;
   if (settingsTree) {
     settingsTree.destroy();
     settingsTree = null;
@@ -1179,6 +1477,10 @@ setupTablePanels();
 // Re-fit terminal on window resize so cols/rows stay in sync.
 window.addEventListener("resize", () => {
   if (fitAddon) fitAddon.fit();
+});
+
+document.addEventListener("visibilitychange", () => {
+  updateMonitorTimer();
 });
 
 (async () => {

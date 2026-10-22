@@ -37,6 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from logging_utils import get_logger
+from monitoring import SandboxMonitor
 
 logger = get_logger("webui")
 ssh_logger = get_logger("ssh")
@@ -373,6 +374,7 @@ class WebUIServer:
         self.ssh_pool = SSHManager(self.root_dir, ssh_cfg.get("port_range", [30200, 30210]))
         self.ssh_pool.cleanup_dead_forwarders()
         self.sessions = SessionStore(self.root_dir, self.session_ttl)
+        self.monitor = SandboxMonitor(self.sandbox_manager, self.config)
 
         self.app = self._create_app()
         self._server: Optional[uvicorn.Server] = None
@@ -956,6 +958,19 @@ class WebUIServer:
                     "login": session.get("login", ""),
                 },
             }
+
+        @app.get("/api/monitor")
+        def monitor_endpoint(ids: str = "", session: Dict[str, Any] = Depends(self._require_session)):
+            requested = [part.strip() for part in str(ids or "").split(",") if part.strip()]
+            if not requested:
+                requested = list(self.config.get("sandboxes", {}).get("items", {}).keys())
+            try:
+                return self.monitor.collect(requested)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error))
+            except Exception:
+                logger.exception("Runtime monitoring failed")
+                raise HTTPException(status_code=500, detail="Runtime monitoring failed")
 
         @app.get("/api/images")
         async def images_endpoint(session: Dict[str, Any] = Depends(self._require_session)):

@@ -785,6 +785,57 @@ class DockerSandboxManager:
         except Exception as exc:
             return False, str(exc)
 
+    def get_container_stats(self, sandbox_ids: List[str]) -> tuple[bool, Any]:
+        """Return raw Docker stats JSON rows for the given sandbox IDs."""
+        if not sandbox_ids:
+            return True, []
+        names = [f'sndbx-{sandbox_id}' for sandbox_id in sandbox_ids]
+        ok, output = self._run_docker_cmd(
+            ['stats', '--no-stream', '--format', '{{json .}}', *names],
+            timeout=8,
+        )
+        if not ok:
+            return False, output.strip()
+        rows: List[Dict[str, Any]] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return True, rows
+
+    def probe_guest_metrics(self, sandbox_id: str) -> tuple[bool, str]:
+        """Run the fixed read-only guest monitoring probe."""
+        script = (
+            'printf "@@MEMINFO\\n"; cat /proc/meminfo 2>/dev/null || true\n'
+            'printf "@@MEMEVENTS\\n"; cat /sys/fs/cgroup/memory.events 2>/dev/null || true\n'
+            'printf "@@SWAP\\n"; cat /sys/fs/cgroup/memory.swap.current 2>/dev/null || true\n'
+            'printf "@@PSIMEM\\n"; cat /sys/fs/cgroup/memory.pressure 2>/dev/null || true\n'
+            'printf "@@PSICPU\\n"; cat /sys/fs/cgroup/cpu.pressure 2>/dev/null || true\n'
+            'printf "@@UPTIME\\n"; cat /proc/uptime 2>/dev/null || true\n'
+            'printf "@@PROCS\\n"; ps -eo pid=,comm=,%cpu=,rss= 2>/dev/null || true\n'
+        )
+        ok, output = self._run_docker_cmd(
+            ['exec', f'sndbx-{sandbox_id}', 'sh', '-c', script],
+            timeout=4,
+        )
+        return ok, output
+
+    def get_container_disk_size(self, sandbox_id: str) -> tuple[bool, Any]:
+        """Return Docker writable-layer size in bytes for one container."""
+        ok, output = self._run_docker_cmd(
+            ['inspect', '--size', '--format', '{{.SizeRw}}', f'sndbx-{sandbox_id}'],
+            timeout=8,
+        )
+        if not ok:
+            return False, output.strip()
+        return True, output.strip()
+
     def get_container_ip(self, sandbox_id: str) -> Optional[str]:
         """Return container IP address for a sandbox, or None when unavailable.
 

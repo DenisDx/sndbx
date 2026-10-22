@@ -97,7 +97,9 @@ The current suite covers:
 - GNU tar verification;
 - full and incremental archive generation;
 - full backup rotation, snapshot protection, restore chains, archive naming,
-  same-image scheduling, and scheduler continuity.
+  same-image scheduling, and scheduler continuity;
+- runtime monitoring parsers, thresholds, debounce, history, caching, and
+  authenticated HTTP endpoint behavior.
 
 Run focused suites when changing a specific subsystem:
 
@@ -122,6 +124,42 @@ PYTHONPATH=src venv/bin/python -m unittest \
   tests.test_settings_migration tests.test_settings_http \
   tests.test_settings_styles -v
 ```
+
+Focused runtime monitoring suite:
+
+```bash
+PYTHONPATH=src venv/bin/python -m unittest tests/test_monitoring.py -v
+```
+
+The monitor tests use captured Docker/guest output and a temporary root. They
+verify byte/percentage parsing, meminfo/OOM parsing, process ranking, host
+thresholds, warning debounce, CPU streaks, history, response caching, stopped
+containers, unknown IDs, authentication, and HTTP 400 responses.
+
+### Runtime monitoring manual protocol
+
+Use a disposable sandbox for these checks. Do not create memory or CPU pressure
+on a production VM.
+
+1. Open Dashboard -> Current containers -> Advance.
+2. Enable **Monitor** for one running VM. Confirm that a detail row appears and
+   the card grows without breaking the table.
+3. Compare the memory and CPU values with `docker stats` and with `free -m`
+   inside the guest.
+4. Run a bounded memory workload inside the disposable VM and verify that the
+   memory graph rises, then shows a warning after two low-availability samples.
+   A critical condition appears immediately below 10 % `MemAvailable`.
+5. If the disposable VM is safe to lose, trigger a small OOM and confirm the
+   `OOM` badge and the guest OOM counter. Never do this on a production VM.
+6. Run a bounded CPU workload and verify the CPU graph and the `CPU` badge.
+7. Turn the switch off and confirm that `/api/monitor` requests stop in the
+   browser network panel.
+8. Hide the browser tab and confirm that polling pauses; show it again and
+   confirm that it resumes.
+9. Stop the VM. The detail row must show `not running`; start it and confirm
+   that collection resumes.
+10. Open two authenticated dashboards and confirm that both use the same
+    backend response cache rather than multiplying Docker calls.
 
 Descriptor validation (strict; typedefs are supplied through the Python API):
 
