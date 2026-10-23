@@ -57,8 +57,11 @@ images/*/
 Thumbs.db
 
 # Project-specific internal docs/instructions
-SPEC.md
 AGENTS.md
+
+#local files
+_local_*.*
+_local_*/
 
 # Working config (generated from template during install)
 config.json5
