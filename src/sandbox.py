@@ -871,6 +871,36 @@ class DockerSandboxManager:
 
         return None
 
+    def published_endpoint(self, sandbox_id: str, vm_port: int) -> Optional[tuple]:
+        """Return the host endpoint published for a guest port, if any.
+
+        input: sandbox id and the guest port
+        output: (host, port) tuple, or None when the port is not published
+        """
+        sandbox_cfg = self.sandbox_configs.get(sandbox_id, {}) or {}
+        rows = sandbox_cfg.get("port_bindings", [])
+        if not isinstance(rows, list):
+            return None
+        try:
+            wanted = int(vm_port)
+        except (TypeError, ValueError):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                candidate = int(row.get("vm_port"))
+                publish_port = int(row.get("publish_port"))
+            except (TypeError, ValueError):
+                continue
+            if candidate != wanted:
+                continue
+            host = str(row.get("bind_host", "0.0.0.0")).strip() or "0.0.0.0"
+            if host in ("0.0.0.0", "::", "[::]", ""):
+                host = "127.0.0.1"
+            return host, publish_port
+        return None
+
     def exec_ssh_setup(self, sandbox_id: str, authorized_keys: List[str]) -> tuple[bool, str]:
         """Install sshd and configure authorized_keys inside a running container.
 
@@ -1149,7 +1179,11 @@ pkill -x sshd || true
         return success, output
 
     def stop_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
-        """Stop a running sandbox with its configured grace period."""
+        """Stop a running sandbox with its configured grace period.
+
+        input: sandbox id
+        output: (success, output)
+        """
         sandbox_cfg = self.sandbox_configs.get(sandbox_id, {})
         try:
             stop_grace_seconds = int(sandbox_cfg.get('stop_grace_seconds', 30))
@@ -1162,7 +1196,28 @@ pkill -x sshd || true
         )
         if success:
             logger.info(f"Stopped sandbox {sandbox_id} after up to {stop_grace_seconds}s")
+        if not success or self._is_persistent(sandbox_cfg):
+            return success, output
+        removed, remove_output = self._run_docker_cmd(['rm', '-f', f'sndbx-{sandbox_id}'])
+        if removed:
+            logger.info(
+                "Removed sandbox container '%s' because it is not persistent", sandbox_id
+            )
+        else:
+            logger.warning(
+                "Could not remove non-persistent sandbox container '%s': %s",
+                sandbox_id,
+                remove_output,
+            )
         return success, output
+
+    @staticmethod
+    def _is_persistent(sandbox_cfg: Dict[str, Any]) -> bool:
+        """Return True when the sandbox keeps its writable layer between runs."""
+        value = sandbox_cfg.get('persistent', True)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
     def execute_command(self, sandbox_id: str, command: str) -> tuple[bool, str]:
         """Execute a command inside the sandbox"""
@@ -1174,6 +1229,41 @@ pkill -x sshd || true
         ])
         logger.info("Command finished in sandbox '%s': success=%s", sandbox_id, success)
         return success, output
+
+    def exec_argv(
+        self,
+        sandbox_id: str,
+        argv: List[str],
+        stdin_data: Optional[str] = None,
+        timeout: int = 30,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+    ) -> tuple[bool, str]:
+        """Execute an argv vector inside the sandbox without a shell.
+
+        input: sandbox id, argument vector, optional stdin payload and encoding
+        output: (success, combined output decoded with the given encoding)
+        """
+        command = ['exec']
+        if stdin_data is not None:
+            command.append('-i')
+        command.append(f'sndbx-{sandbox_id}')
+        command.extend(argv)
+        logger.info("Executing argv in sandbox '%s': %s", sandbox_id, argv)
+        payload = stdin_data.encode(encoding, errors) if stdin_data is not None else None
+        try:
+            result = subprocess.run(
+                ['docker'] + command,
+                input=payload,
+                capture_output=True,
+                timeout=timeout,
+            )
+            output = (result.stdout + result.stderr).decode(encoding, errors)
+            return result.returncode == 0, output
+        except subprocess.TimeoutExpired:
+            return False, "Command timed out"
+        except Exception as exc:
+            return False, str(exc)
 
     def restart_sandbox(self, sandbox_id: str) -> tuple[bool, str]:
         """Restart a sandbox after Docker has stopped its previous task."""
@@ -1188,6 +1278,8 @@ pkill -x sshd || true
             return False, f"Sandbox {sandbox_id} not in configuration"
 
         container_name = f'sndbx-{sandbox_id}'
+        sandbox_cfg = self.sandbox_configs.get(sandbox_id, {})
+        persistent = self._is_persistent(sandbox_cfg)
         exists, diff_output = self._run_docker_cmd(['diff', container_name])
         docker_runtime_diff = {
             'C /etc',
@@ -1199,7 +1291,7 @@ pkill -x sshd || true
             line for line in diff_output.splitlines()
             if line.strip() and line.strip() not in docker_runtime_diff
         ]
-        if exists and rootfs_changes:
+        if persistent and exists and rootfs_changes:
             return False, (
                 'Container root filesystem has changes; Recreate was cancelled to protect '
                 'settings. Move persistent settings into configured mounts or volumes first.'

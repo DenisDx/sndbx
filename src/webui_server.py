@@ -38,6 +38,7 @@ from pydantic import BaseModel
 
 from logging_utils import get_logger
 from monitoring import SandboxMonitor
+from kata import kata_runtime_paths
 
 logger = get_logger("webui")
 ssh_logger = get_logger("ssh")
@@ -128,11 +129,12 @@ class SSHManager:
     State is persisted in data/ssh_allocations.json to survive Web UI restarts.
     """
 
-    def __init__(self, root_dir: Path, port_range: List[int]):
+    def __init__(self, root_dir: Path, port_range: List[int], session_ttl_seconds: int = 3600):
         self.root_dir = root_dir
         self.data_dir = root_dir / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.data_dir / "ssh_allocations.json"
+        self.session_ttl_seconds = max(0, int(session_ttl_seconds or 0))
 
         start = int(port_range[0]) if len(port_range) > 0 else 30200
         end = int(port_range[1]) if len(port_range) > 1 else 30210
@@ -274,6 +276,47 @@ class SSHManager:
         if changed:
             self._save(data)
 
+    def expire_stale(self, now: Optional[datetime] = None) -> List[str]:
+        """Release forwarders whose reservation is older than the session TTL.
+
+        input: optional reference time (defaults to now)
+        output: sandbox ids whose forwarder was released
+        """
+        if self.session_ttl_seconds <= 0:
+            return []
+        reference = now or _utc_now()
+        cutoff = reference.timestamp() - self.session_ttl_seconds
+        data = self._load()
+        expired: List[str] = []
+        for sandbox_id, row in list(data.items()):
+            if not isinstance(row, dict):
+                continue
+            allocated = row.get("allocated_at")
+            try:
+                stamp = datetime.fromisoformat(str(allocated))
+            except (TypeError, ValueError):
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if stamp.timestamp() > cutoff:
+                continue
+            pid = row.get("socat_pid")
+            if pid:
+                try:
+                    os.kill(int(pid), 15)
+                except Exception:
+                    pass
+            del data[sandbox_id]
+            expired.append(sandbox_id)
+            ssh_logger.info(
+                "Released SSH forwarder for sandbox '%s' after the %d s session TTL",
+                sandbox_id,
+                self.session_ttl_seconds,
+            )
+        if expired:
+            self._save(data)
+        return expired
+
 
 class MCPClient:
     """Client for connecting to MCP server."""
@@ -371,14 +414,20 @@ class WebUIServer:
         self.session_ttl = int(auth_cfg.get("session_ttl", 86400))
 
         ssh_cfg = config.get("ssh", {})
-        self.ssh_pool = SSHManager(self.root_dir, ssh_cfg.get("port_range", [30200, 30210]))
+        self.ssh_pool = SSHManager(
+            self.root_dir,
+            ssh_cfg.get("port_range", [30200, 30210]),
+            session_ttl_seconds=int(ssh_cfg.get("session_ttl", 3600) or 0),
+        )
         self.ssh_pool.cleanup_dead_forwarders()
+        self.ssh_pool.expire_stale()
         self.sessions = SessionStore(self.root_dir, self.session_ttl)
         self.monitor = SandboxMonitor(self.sandbox_manager, self.config)
 
         self.app = self._create_app()
         self._server: Optional[uvicorn.Server] = None
         self.started_event = asyncio.Event()
+        self._ssh_expiry_task: Optional[asyncio.Task] = None
         self._restart_requested_at_monotonic: float = 0.0
         self._restart_state_ttl_sec: float = 120.0
         self._image_builds: Dict[str, Dict[str, Any]] = {}
@@ -623,7 +672,7 @@ class WebUIServer:
         except Exception as exc:
             checks["docker"] = {"ok": False, "detail": str(exc)}
 
-        shim_path = Path("/opt/kata/runtime-rs/bin/containerd-shim-kata-v2")
+        shim_path = kata_runtime_paths()["shim"]
         try:
             kata = subprocess.run([str(shim_path), "--version"], capture_output=True, text=True, timeout=5)
             detail = (kata.stdout or "").strip() or "ok"
@@ -696,163 +745,80 @@ class WebUIServer:
 
         return result
 
-        def _repair_kata_runtime(self) -> Dict[str, Any]:
-            """Repair the supported Kata 4.1 runtime-rs registration using non-interactive sudo."""
-            shim_path = Path("/opt/kata/runtime-rs/bin/containerd-shim-kata-v2")
-            config_path = Path("/etc/kata-containers/runtime-rs/configuration.toml")
-            default_config = Path(
-                "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml"
-            )
-            report: List[str] = []
-            if not shim_path.is_file() or not os.access(shim_path, os.X_OK):
-                return {
-                    "ok": False,
-                    "message": "Kata 4.1 runtime-rs shim is not available",
-                    "report": [f"missing executable: {shim_path}"],
-                }
-
-            shim = subprocess.run([str(shim_path), "--version"], capture_output=True, text=True, timeout=5)
-            if shim.returncode != 0:
-                return {
-                    "ok": False,
-                    "message": "Kata runtime-rs shim is not executable",
-                    "report": [shim.stderr.strip() or "shim version check failed"],
-                }
-            report.append((shim.stdout or "").strip())
-
-            current = subprocess.run(
-                ["docker", "info", "--format", "{{json .Runtimes}}"],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-            has_kata = current.returncode == 0 and '"kata"' in (current.stdout or "")
-            if has_kata and config_path.is_file():
-                report.append("Docker runtime 'kata' and Kata runtime-rs configuration are present")
-                return {"ok": True, "message": "Kata runtime is already configured", "report": report}
-            if not default_config.is_file():
-                return {
-                    "ok": False,
-                    "message": "Kata default runtime-rs configuration is missing",
-                    "report": [*report, f"missing default configuration: {default_config}"],
-                }
-
-            repair_cmd = " ".join((
-                "set -e;",
-                "sudo -n mkdir -p /etc/kata-containers/runtime-rs /etc/docker;",
-                f"if [[ ! -f {shlex.quote(str(config_path))} ]]; then sudo -n cp {shlex.quote(str(default_config))} {shlex.quote(str(config_path))}; fi;",
-                "if [[ ! -f /etc/docker/daemon.json ]]; then echo '{}' | sudo -n tee /etc/docker/daemon.json >/dev/null; fi;",
-                "tmpfile=$(mktemp);",
-                f"jq --arg shim {shlex.quote(str(shim_path))} --arg config {shlex.quote(str(config_path))} "
-                "'. as $cfg | ($cfg.runtimes // {}) as $r | $cfg + {runtimes: ($r + {kata: {runtimeType: $shim, options: {ConfigPath: $config}}})}' "
-                "/etc/docker/daemon.json > \"$tmpfile\";",
-                "sudo -n mv \"$tmpfile\" /etc/docker/daemon.json;",
-                "sudo -n systemctl reload docker;",
-            ))
-            attempt = subprocess.run(["bash", "-lc", repair_cmd], capture_output=True, text=True, timeout=30)
-            if attempt.returncode != 0:
-                detail = ((attempt.stderr or "") + "\n" + (attempt.stdout or "")).strip()
-                return {
-                    "ok": False,
-                    "message": "Kata runtime repair requires passwordless sudo",
-                    "report": [*report, detail or "repair command failed"],
-                }
-
-            verify = subprocess.run(
-                ["docker", "info", "--format", "{{json .Runtimes}}"],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-            if verify.returncode == 0 and '"kata"' in (verify.stdout or "") and config_path.is_file():
-                report.append("Kata runtime-rs registration restored")
-                return {"ok": True, "message": "Kata runtime repaired successfully", "report": report}
+    def _repair_kata_runtime(self) -> Dict[str, Any]:
+        """Repair the supported Kata 4.1 runtime-rs registration using non-interactive sudo."""
+        paths = kata_runtime_paths()
+        shim_path = paths["shim"]
+        config_path = paths["config"]
+        default_config = paths["default_config"]
+        report: List[str] = []
+        if not shim_path.is_file() or not os.access(shim_path, os.X_OK):
             return {
                 "ok": False,
-                "message": "Repair completed but Kata runtime is still unavailable",
-                "report": report,
+                "message": "Kata 4.1 runtime-rs shim is not available",
+                "report": [f"missing executable: {shim_path}"],
             }
 
-            if needs_cfg_rewrite and cfg_ok:
-                try:
-                    cfg_ok = "/opt/kata/" not in etc_cfg.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    cfg_ok = False
-
-            if needs_cfg_compat and cfg_ok:
-                try:
-                    cfg_ok = "disable_image_nvdimm = true" in etc_cfg.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    cfg_ok = False
-
-            if needs_low_phys_compat and cfg_ok:
-                try:
-                    cfg_text_after = etc_cfg.read_text(encoding="utf-8", errors="ignore")
-                    cfg_ok = (
-                        "path = \"/usr/local/bin/kata-qemu-wrapper\"" in cfg_text_after
-                        and "machine_type = \"q35\"" in cfg_text_after
-                        and "memory_slots = 0" in cfg_text_after
-                    )
-                except Exception:
-                    cfg_ok = False
-
-            if runtime_ok and cfg_ok:
-                report.append("Kata runtime repair steps completed successfully")
-                logger.info("Kata runtime repair completed successfully")
-                return {
-                    "ok": True,
-                    "message": "Kata runtime repaired successfully",
-                    "report": report,
-                }
-
-            if not runtime_ok:
-                report.append("Repair command completed, but runtime still not visible")
-                logger.warning("Kata runtime repair command finished but runtime is still not visible in docker info")
-            if not cfg_ok:
-                report.append("Repair command completed, but /etc/kata-containers/configuration.toml is missing or still contains /opt/kata paths")
-                logger.warning("Kata runtime repair command finished but Kata config is still invalid")
-
+        shim = subprocess.run([str(shim_path), "--version"], capture_output=True, text=True, timeout=5)
+        if shim.returncode != 0:
             return {
                 "ok": False,
-                "message": "Repair attempted but not all checks passed",
-                "report": report,
+                "message": "Kata runtime-rs shim is not executable",
+                "report": [shim.stderr.strip() or "shim version check failed"],
+            }
+        report.append((shim.stdout or "").strip())
+
+        current = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        has_kata = current.returncode == 0 and '"kata"' in (current.stdout or "")
+        if has_kata and config_path.is_file():
+            report.append("Docker runtime 'kata' and Kata runtime-rs configuration are present")
+            return {"ok": True, "message": "Kata runtime is already configured", "report": report}
+        if not default_config.is_file():
+            return {
+                "ok": False,
+                "message": "Kata default runtime-rs configuration is missing",
+                "report": [*report, f"missing default configuration: {default_config}"],
             }
 
-        err = ((attempt.stderr or "") + "\n" + (attempt.stdout or "")).strip()
-        report.append("Automatic repair failed")
-        if err:
-            report.append(err)
-            logger.warning("Kata runtime automatic repair failed: %s", err)
+        repair_cmd = " ".join((
+            "set -e;",
+            "sudo -n mkdir -p /etc/kata-containers/runtime-rs /etc/docker;",
+            f"if [[ ! -f {shlex.quote(str(config_path))} ]]; then sudo -n cp {shlex.quote(str(default_config))} {shlex.quote(str(config_path))}; fi;",
+            "if [[ ! -f /etc/docker/daemon.json ]]; then echo '{}' | sudo -n tee /etc/docker/daemon.json >/dev/null; fi;",
+            "tmpfile=$(mktemp);",
+            f"jq --arg shim {shlex.quote(str(shim_path))} --arg config {shlex.quote(str(config_path))} "
+            "'. as $cfg | ($cfg.runtimes // {}) as $r | $cfg + {runtimes: ($r + {kata: {runtimeType: $shim, options: {ConfigPath: $config}}})}' "
+            "/etc/docker/daemon.json > \"$tmpfile\";",
+            "sudo -n mv \"$tmpfile\" /etc/docker/daemon.json;",
+            "sudo -n systemctl reload docker;",
+        ))
+        attempt = subprocess.run(["bash", "-lc", repair_cmd], capture_output=True, text=True, timeout=30)
+        if attempt.returncode != 0:
+            detail = ((attempt.stderr or "") + "\n" + (attempt.stdout or "")).strip()
+            return {
+                "ok": False,
+                "message": "Kata runtime repair requires passwordless sudo",
+                "report": [*report, detail or "repair command failed"],
+            }
 
-        manual = [
-            "sudo mkdir -p /etc/docker",
-            "if [ ! -f /etc/docker/daemon.json ]; then echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null; fi",
-            "tmpfile=$(mktemp) && jq '. as $cfg | ($cfg.runtimes // {}) as $r | ($r.kata // {}) as $k | $cfg + {runtimes: ($r + {kata: (($k + {runtimeType: \"io.containerd.kata.v2\"}) | del(.path))})}' /etc/docker/daemon.json > \"$tmpfile\" && sudo mv \"$tmpfile\" /etc/docker/daemon.json",
-            f"if [ ! -f /etc/kata-containers/configuration.toml ]; then for f in {shlex.quote(str(defaults_dir / 'configuration.toml'))} {shlex.quote(str(defaults_dir / 'configuration-qemu.toml'))} {shlex.quote(str(defaults_dir / 'configuration-fc.toml'))} {shlex.quote(str(defaults_dir / 'configuration-clh.toml'))}; do if [ -f \"$f\" ]; then sudo mkdir -p /etc/kata-containers && sudo cp \"$f\" /etc/kata-containers/configuration.toml && break; fi; done; fi",
-            f"if [ -f /etc/kata-containers/configuration.toml ]; then sudo sed -i 's#/opt/kata/#{kata_root_for_sed}/#g' /etc/kata-containers/configuration.toml; fi",
-            "if [ -f /etc/kata-containers/configuration.toml ]; then"
-            " if grep -qE '^[[:space:]]*disable_image_nvdimm[[:space:]]*=' /etc/kata-containers/configuration.toml; then"
-            " sudo sed -i -E 's/^[[:space:]]*disable_image_nvdimm[[:space:]]*=.*/disable_image_nvdimm = true/' /etc/kata-containers/configuration.toml;"
-            " else tmp_kata_cfg=$(mktemp);"
-            " awk 'BEGIN{ins=0}{print; if(!ins && /^\\[hypervisor\\.qemu\\]$/){print \"disable_image_nvdimm = true\"; ins=1}}' /etc/kata-containers/configuration.toml > \"$tmp_kata_cfg\";"
-            " sudo mv \"$tmp_kata_cfg\" /etc/kata-containers/configuration.toml; fi; fi",
-            f"if [ -f /etc/kata-containers/configuration.toml ]; then if [ ! -x /usr/local/bin/kata-qemu-wrapper ]; then"
-            f" printf '#!/usr/bin/env bash\\nexec {shlex.quote(str(kata_root / 'bin' / 'qemu-system-x86_64'))} -global q35-pcihost.pci-hole64-size=1073741824 \"$@\"\\n' | sudo tee /usr/local/bin/kata-qemu-wrapper >/dev/null;"
-            " sudo chmod +x /usr/local/bin/kata-qemu-wrapper; fi; fi",
-            "if [ -f /etc/kata-containers/configuration.toml ]; then sudo sed -i -E 's/^[[:space:]]*machine_type[[:space:]]*=.*/machine_type = \"q35\"/' /etc/kata-containers/configuration.toml; sudo sed -i -E 's/^[[:space:]]*memory_slots[[:space:]]*=.*/memory_slots = 0/' /etc/kata-containers/configuration.toml; sudo sed -i -E 's#^[[:space:]]*path[[:space:]]*=[[:space:]]*\".*qemu-system-x86_64\"#path = \"/usr/local/bin/kata-qemu-wrapper\"#' /etc/kata-containers/configuration.toml; if grep -qE '^[[:space:]]*valid_hypervisor_paths[[:space:]]*=' /etc/kata-containers/configuration.toml && ! grep -q '/usr/local/bin/kata-qemu-wrapper' /etc/kata-containers/configuration.toml; then sudo sed -i -E 's#^[[:space:]]*valid_hypervisor_paths[[:space:]]*=[[:space:]]*\[(.*)\]#valid_hypervisor_paths = [\1, \"/usr/local/bin/kata-qemu-wrapper\"]#' /etc/kata-containers/configuration.toml; fi; fi",
-            "sudo systemctl restart docker",
-            "docker info --format '{{json .Runtimes}}'",
-        ]
-
-        logger.warning("Kata runtime auto-repair needs manual steps. Run the following commands:")
-        for cmd in manual:
-            logger.warning("MANUAL_REPAIR_CMD: %s", cmd)
-
+        verify = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if verify.returncode == 0 and '"kata"' in (verify.stdout or "") and config_path.is_file():
+            report.append("Kata runtime-rs registration restored")
+            return {"ok": True, "message": "Kata runtime repaired successfully", "report": report}
         return {
             "ok": False,
-            "message": "Automatic repair requires sudo permissions",
+            "message": "Repair completed but Kata runtime is still unavailable",
             "report": report,
-            "manual_commands": manual,
         }
 
     def _read_system_log(self, lines: int = 200) -> Dict[str, Any]:
@@ -1111,6 +1077,19 @@ class WebUIServer:
                 await websocket.close(code=4001)
                 return
 
+            permissions = session.get("permissions", []) or []
+            if "all" not in permissions:
+                logger.warning(
+                    "ws_console: session '%s' lacks full permissions for sandbox '%s'",
+                    session.get("login", "?"),
+                    sandbox_id,
+                )
+                await websocket.send_text(
+                    "\r\n[sndbx] Full permissions are required to open a console.\r\n"
+                )
+                await websocket.close(code=4001)
+                return
+
             # Ensure sandbox is running before opening terminal session.
             logger.info("ws_console: ensuring sandbox '%s' is running", sandbox_id)
             if not self._ensure_sandbox_running(sandbox_id):
@@ -1291,6 +1270,17 @@ class WebUIServer:
 
         return app
 
+    async def _ssh_expiry_loop(self) -> None:
+        """Release SSH forwarders whose session TTL has expired."""
+        while True:
+            try:
+                await asyncio.sleep(60)
+                self.ssh_pool.expire_stale()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning("SSH session expiry sweep failed: %s", error)
+
     async def start(self) -> None:
         """Run uvicorn server."""
         cfg = uvicorn.Config(
@@ -1309,9 +1299,16 @@ class WebUIServer:
                 self.started_event.set()
 
         asyncio.create_task(_mark_started())
+        if self.ssh_pool.session_ttl_seconds > 0:
+            self._ssh_expiry_task = asyncio.create_task(
+                self._ssh_expiry_loop(), name="sndbx-ssh-expiry"
+            )
         await self._server.serve()
 
     async def stop(self) -> None:
         """Request graceful shutdown."""
+        if self._ssh_expiry_task is not None:
+            self._ssh_expiry_task.cancel()
+            self._ssh_expiry_task = None
         if self._server is not None:
             self._server.should_exit = True

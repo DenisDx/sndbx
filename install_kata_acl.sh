@@ -12,6 +12,7 @@ kata_config=/etc/kata-containers/runtime-rs/configuration-acl.toml
 docker_config=/etc/docker/daemon.json
 cache_dir=${KATA_ACL_CACHE_DIR:-/var/cache/sndbx-kata-acl}
 provided_archive=${KATA_ACL_ARCHIVE:-}
+smoke_image=${SNDBX_SMOKE_IMAGE:-denis-obsidian-assistant:latest}
 stage=
 installed_target=false
 installed_config=false
@@ -117,7 +118,19 @@ import re
 import sys
 from pathlib import Path
 
-source_path = Path("/etc/kata-containers/configuration.toml")
+# install_prerequisites.sh writes the runtime-rs configuration; older hosts
+# still carry the legacy path. Use whichever one exists.
+candidates = [
+    Path("/etc/kata-containers/runtime-rs/configuration.toml"),
+    Path("/etc/kata-containers/configuration.toml"),
+]
+source_path = next((path for path in candidates if path.is_file()), None)
+if source_path is None:
+    raise SystemExit(
+        "No Kata configuration found; expected one of: "
+        + ", ".join(str(path) for path in candidates)
+    )
+
 target_path = Path(sys.argv[1])
 content = source_path.read_text(encoding="utf-8").replace("/opt/kata/", "/opt/kata-acl/")
 
@@ -192,7 +205,7 @@ docker_changed=true
 systemctl reload docker
 docker info --format '{{json .Runtimes}}' | jq -e '."kata-acl" != null' >/dev/null
 printf '%s\n' 'docker_runtime=REGISTERED'
-docker run --rm --pull never --runtime "$runtime_name" --entrypoint /bin/true denis-obsidian-assistant:latest
+docker run --rm --pull never --runtime "$runtime_name" --entrypoint /bin/true "$smoke_image"
 printf '%s\n' 'kata_acl_smoke=PASS'
 
 printf '%s\n' 'kata_acl_install=PASS'

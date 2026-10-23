@@ -288,12 +288,12 @@
           },
           disk_max: {
             type: "string",
-            description: "Disk limit, for example 20G",
+            description: "Disk limit for the writable layer, for example 20G; best effort, dropped when the storage driver rejects it",
             env: { allowed: true },
           },
           network_traffic_max: {
             type: "string",
-            description: "Traffic limit placeholder, for example 100G",
+            description: "Traffic limit placeholder, for example 100G; advisory only, not enforced",
             env: { allowed: true },
           },
           shm_size: {
@@ -310,7 +310,7 @@
           },
           persistent: {
             type: "bool",
-            description: "Keep sandbox data between restarts",
+            description: "Keep the sandbox writable layer between runs; false removes the container on stop so the next start is fresh",
           },
           run_at_startup: {
             type: "bool",

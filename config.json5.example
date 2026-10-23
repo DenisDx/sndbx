@@ -20,7 +20,12 @@
       "sandbox_manager": "info",
       "ssh": "info"
     },
+    log_mcp_requests: true,
     wipe_period: ${LOG_WIPE_PERIOD:-0},
+    // Seconds of log history to keep when wiping; defaults to wipe_period.
+    wipe_max_age: ${LOG_WIPE_MAX_AGE:-0},
+    // Size cap in megabytes for logs/mcp_requests.jsonl; 0 disables rotation.
+    mcp_request_log_max_mb: ${MCP_REQUEST_LOG_MAX_MB:-64},
   },
 
   webui: {
@@ -224,6 +229,6 @@
 
   ssh: {
     port_range: [${SSH_PORT_MIN:-30200}, ${SSH_PORT_MAX:-30210}],
-    session_ttl: 3600  // 1 hour
+    session_ttl: ${SSH_SESSION_TTL:-3600}  // 1 hour; 0 keeps the relay until it is closed
   }
 }

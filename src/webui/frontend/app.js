@@ -7,6 +7,7 @@ let term = null;
 let fitAddon = null;
 let termSocket = null;
 let consoleLoaded = false;
+let consoleLoading = false;
 let termDataDisposable = null;
 let logPanelBound = false;
 let restartInProgress = false;
@@ -309,8 +310,8 @@ function autoStartButton(sandboxId, enabled) {
   const label = enabled ? "Enabled" : "Disabled";
   const stateClass = enabled ? "enabled" : "disabled";
   const title = enabled
-    ? "Disable automatic start at sndbx startup.\nNo shell command. Saves run_at_startup=false in data/sandbox_startup_overrides.json"
-    : "Enable automatic start at sndbx startup.\nNo shell command. Saves run_at_startup=true in data/sandbox_startup_overrides.json";
+    ? "Disable automatic start at sndbx startup.\nNo shell command. Saves run_at_startup=false in the root config.json5"
+    : "Enable automatic start at sndbx startup.\nNo shell command. Saves run_at_startup=true in the root config.json5";
   return `<button class="autostart ${stateClass}" title="${title}" onclick="runAction('${escapeHtml(sandboxId)}','${action}')">${label}</button>`;
 }
 
@@ -1185,6 +1186,7 @@ async function onLogin() {
   }
   showScreen("app");
   showPage("dashboard");
+  initMCPTest();
   await loadDashboard();
   clearInterval(refreshTimer);
   refreshTimer = setInterval(loadDashboard, 3000);
@@ -1226,15 +1228,56 @@ function setConsoleStatus(text, ok = false) {
   el.style.color = ok ? "var(--ok)" : "var(--warn)";
 }
 
-function initConsole() {
-  if (consoleLoaded) {
-    return;
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const element = document.createElement("script");
+    element.src = src;
+    element.onload = () => resolve();
+    element.onerror = () => reject(new Error(`failed to load ${src}`));
+    document.head.appendChild(element);
+  });
+}
+
+async function ensureTerminalLoaded() {
+  if (window.Terminal && window.FitAddon) {
+    return true;
   }
 
-  if (!window.Terminal) {
-    setConsoleStatus("xterm.js failed to load", false);
+  // The CDN tags carry onerror handlers that swap in the vendored copies.
+  // Give them a moment to settle before loading the local files ourselves.
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (window.Terminal && window.FitAddon) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  try {
+    if (!window.Terminal) {
+      await loadScript("/vendor/xterm.min.js");
+    }
+    if (!window.FitAddon) {
+      await loadScript("/vendor/addon-fit.min.js");
+    }
+  } catch (error) {
+    return false;
+  }
+  return Boolean(window.Terminal && window.FitAddon);
+}
+
+async function initConsole() {
+  if (consoleLoaded || consoleLoading) {
     return;
   }
+  consoleLoading = true;
+
+  const loaded = await ensureTerminalLoaded();
+  if (!loaded) {
+    setConsoleStatus("xterm.js failed to load", false);
+    consoleLoading = false;
+    return;
+  }
+  consoleLoaded = true;
 
   term = new window.Terminal({
     cursorBlink: true,

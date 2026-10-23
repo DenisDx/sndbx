@@ -47,10 +47,13 @@ class MCPServer:
 
         # JSONL request log
         self._request_log_file = None
+        self._request_log_path = None
+        self._request_log_max_bytes = self._request_log_limit()
         if config.get("logging", {}).get("log_mcp_requests", False):
             root = config.get("root", ".")
             log_path = os.path.join(root, "logs", "mcp_requests.jsonl")
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            self._request_log_path = log_path
             try:
                 self._request_log_file = open(log_path, "a", encoding="utf-8", buffering=1)  # line-buffered
                 logger.info("MCP request log: %s", log_path)
@@ -206,6 +209,49 @@ class MCPServer:
 
         self._app.middlewares.append(request_logging_middleware)
 
+    def _request_log_limit(self) -> int:
+        """Return the MCP request log size cap in bytes.
+
+        output: byte limit; 0 disables rotation
+        """
+        logging_cfg = self.config.get("logging", {}) if isinstance(self.config, dict) else {}
+        try:
+            limit_mb = int(logging_cfg.get("mcp_request_log_max_mb", 64) or 0)
+        except (TypeError, ValueError):
+            limit_mb = 64
+        if limit_mb <= 0:
+            return 0
+        return limit_mb * 1024 * 1024
+
+    def _rotate_request_log_if_needed(self) -> None:
+        """Rotate the MCP request log when it grew past the configured cap.
+
+        output: None; the open handle is replaced after rotation
+        """
+        if self._request_log_file is None or self._request_log_path is None:
+            return
+        if self._request_log_max_bytes <= 0:
+            return
+        try:
+            size = os.fstat(self._request_log_file.fileno()).st_size
+        except OSError:
+            return
+        if size <= self._request_log_max_bytes:
+            return
+        path = self._request_log_path
+        try:
+            self._request_log_file.close()
+        except OSError:
+            pass
+        self._request_log_file = None
+        try:
+            if os.path.exists(path):
+                os.replace(path, f"{path}.1")
+            self._request_log_file = open(path, "a", encoding="utf-8", buffering=1)
+            logger.info("Rotated MCP request log at %s (%d bytes)", path, size)
+        except OSError as exc:
+            logger.error("Cannot rotate MCP request log %s: %s", path, exc)
+
     def _log_rpc(self, type_: str, data: Any) -> None:
         """Append one JSONL entry to the request log if enabled.
 
@@ -219,6 +265,8 @@ class MCPServer:
             self._request_log_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception as exc:
             logger.warning("Failed to write MCP request log entry: %s", exc)
+            return
+        self._rotate_request_log_if_needed()
 
     def _cors_headers(self, request: web.Request) -> Dict[str, str]:
         """Build CORS headers for browser-based MCP calls.

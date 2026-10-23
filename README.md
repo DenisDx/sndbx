@@ -356,9 +356,12 @@ Dashboard runtime monitoring:
   reliable per-VM disk percentage or `disk_max` quota is not exposed.
 
 Console transport:
-- Frontend: xterm.js
+- Frontend: xterm.js, loaded from a CDN with a local fallback in
+  `src/webui/frontend/vendor/` (the console works on an offline host)
 - Backend: authenticated WebSocket endpoint `/ws/console/{sandbox_id}`
 - Runtime: PTY bridge to `docker exec -i sndbx-<sandbox_id> bash`
+- Access: the session must carry the `all` permission; a read-only viewer
+  session is refused with close code 4001
 ### 2. Get Sandbox Status
 
 Check if a sandbox is running:
@@ -524,12 +527,19 @@ If the tool doesn't exist:
 
 The `.env` file contains environment variables:
 - `SNDBX_ROOT`: Installation directory
+- `SNDBX_INSTANCE`: Instance label shown in logs and the Web UI
 - `LOG_LEVEL`: Logging verbosity (debug, info, warning, error)
+- `LOG_TIMEZONE`: Log timestamps timezone (`local`, `UTC` or an IANA name)
+- `LOG_WIPE_PERIOD`: Seconds between log wipe runs (`0` = never wipe)
+- `LOG_WIPE_MAX_AGE`: Seconds of log history to keep (defaults to the period)
+- `MCP_REQUEST_LOG_MAX_MB`: Size cap for `logs/mcp_requests.jsonl` (`0` = no cap)
 - `MCP_PORT`: MCP server listen port (default: 30081)
 - `MCP_HOST`: MCP server bind address (default: 0.0.0.0)
 - `MCP_TOKENS`: Comma-separated authentication tokens
+- `SSH_SESSION_TTL`: SSH forwarder lifetime in seconds (`0` = keep until closed)
 
-Edit `.env` to customize settings:
+`.env.example` lists every variable with dummy values and a comment. Edit
+`.env` to customize settings:
 
 ```bash
 nano .env
@@ -787,16 +797,25 @@ Or recreate the sandbox via Web UI / MCP to have the mirror applied automaticall
 - Check `MCP_TOKENS` in `.env` contains the token being used
 - Note: Tokens are comma-separated, no spaces
 
-## Next Steps
+## Current Feature Set
 
-The MVP includes basic infrastructure:
-- Docker containers with Kata runtime for isolation
-- MCP server for remote management
-- Configuration via .env and config.json5
+The MVP infrastructure is in place and has grown into the current feature set:
 
-Future enhancements:
-- Web UI dashboard for VM management
-- SSH access pool and port forwarding
-- User and ACL system
-- Persistent storage for VMs
-- Container image registry integration
+- Docker containers with the Kata runtime for hardware-level isolation
+- MCP server for remote management (streamable HTTP and legacy SSE)
+- Web UI with a dashboard, a settings editor, a console and an MCP test tab
+- SSH access pool with host-side port forwarding and a session TTL
+- Configuration via `.env`, the root `config.json5` and per-image overlays,
+  validated by a schema descriptor
+- Per-VM runtime monitoring and per-VM incremental backups
+- A proxy that forwards MCP calls to MCP servers running inside a sandbox
+
+Still on the roadmap:
+- A per-tool authorization policy for MCP tokens
+- Dynamically created environment ids
+- A files tab for browsing the shared directory
+- Per-VM network policy and disk quotas
+- A container image registry integration
+
+`SPEC_NEW.md` and the documents under `docs/` describe the current
+architecture in detail.

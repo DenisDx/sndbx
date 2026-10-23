@@ -73,6 +73,18 @@
             minimum: 0,
             env: { allowed: true, convert: "int" },
           },
+          wipe_max_age: {
+            type: "int",
+            description: "Seconds of log history to keep; defaults to wipe_period",
+            minimum: 0,
+            env: { allowed: true, convert: "int" },
+          },
+          mcp_request_log_max_mb: {
+            type: "int",
+            description: "Size cap in megabytes for logs/mcp_requests.jsonl; 0 disables rotation",
+            minimum: 0,
+            env: { allowed: true, convert: "int" },
+          },
         },
       },
 
@@ -219,8 +231,9 @@
           },
           session_ttl: {
             type: "int",
-            description: "SSH relay lifetime in seconds",
+            description: "SSH relay lifetime in seconds; 0 keeps the relay until it is closed manually",
             minimum: 0,
+            env: { allowed: true, convert: "int" },
           },
         },
       },

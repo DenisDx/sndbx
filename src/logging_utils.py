@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
 import threading
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 
@@ -274,3 +275,116 @@ class _StdlibBridgeHandler(logging.Handler):
 def get_logger(tag: str) -> TagLogger:
     """Return a tag-bound logger adapter."""
     return TagLogger(tag)
+
+
+def _parse_log_timestamp(line: str) -> Optional[datetime]:
+    """Parse the leading ISO-8601 timestamp of one log line."""
+    text = str(line or "").strip()
+    if not text:
+        return None
+    token = text.split(" ", 1)[0]
+    if not token:
+        return None
+    try:
+        parsed = datetime.fromisoformat(token.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _rewrite_in_place(path: Path, lines: List[str]) -> None:
+    """Replace a file's content without replacing its inode."""
+    with path.open("r+", encoding="utf-8") as handle:
+        handle.seek(0)
+        handle.write("".join(lines))
+        handle.truncate()
+
+
+def _wipe_text_log(path: Path, cutoff: datetime) -> int:
+    """Drop text log entries older than the cutoff; return the removed count.
+
+    A log message may span several lines, and only its first line carries the
+    timestamp. Continuation lines inherit the timestamp of the entry they
+    belong to, so a multi-line traceback is removed as a whole.
+    """
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    kept: List[str] = []
+    removed = 0
+    entry_stamp: Optional[datetime] = None
+    for line in content.splitlines(keepends=True):
+        stamp = _parse_log_timestamp(line)
+        if stamp is not None:
+            entry_stamp = stamp
+        elif entry_stamp is None:
+            # An orphaned continuation line whose entry header is gone.
+            removed += 1
+            continue
+        if entry_stamp < cutoff:
+            removed += 1
+            continue
+        kept.append(line)
+    if removed:
+        _rewrite_in_place(path, kept)
+    return removed
+
+
+def _wipe_jsonl_log(path: Path, cutoff: datetime) -> int:
+    """Drop JSONL log entries older than the cutoff; return the removed count."""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    kept: List[str] = []
+    removed = 0
+    for line in content.splitlines(keepends=True):
+        stamp = None
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            entry = None
+        if isinstance(entry, dict):
+            raw = entry.get("ts")
+            if isinstance(raw, str):
+                try:
+                    stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    stamp = None
+                if stamp is not None and stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+        if stamp is not None and stamp < cutoff:
+            removed += 1
+            continue
+        kept.append(line)
+    if removed:
+        _rewrite_in_place(path, kept)
+    return removed
+
+
+def wipe_expired_logs(logs_dir: Path, max_age_seconds: float) -> Dict[str, int]:
+    """Remove log entries older than the given age.
+
+    input: log directory and the maximum age in seconds
+    output: mapping of file name to the number of removed entries
+    """
+    if max_age_seconds <= 0:
+        return {}
+    directory = Path(logs_dir)
+    if not directory.is_dir():
+        return {}
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=float(max_age_seconds))
+    removed: Dict[str, int] = {}
+    for path in sorted(directory.glob("*.log")):
+        count = _wipe_text_log(path, cutoff)
+        if count:
+            removed[path.name] = count
+    jsonl = directory / "mcp_requests.jsonl"
+    if jsonl.is_file():
+        count = _wipe_jsonl_log(jsonl, cutoff)
+        if count:
+            removed[jsonl.name] = count
+    return removed

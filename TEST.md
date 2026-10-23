@@ -78,12 +78,8 @@ Run the complete project regression suite:
 PYTHONPATH=src venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Expected result: all tests pass. Known pre-existing failures in this checkout:
-`test_run_creates_incremental_archive`,
-`test_full_plus_incremental_restores_changes` and
-`test_chain_metadata_records_full_and_incremental` in `tests/test_backup.py`
-reproduce at `HEAD` without the aiset changes and are unrelated to settings.
-After the live root trim, `test_settings_parity` skips (trim parity is covered by
+Expected result: all tests pass. One skip is expected: after the live root
+trim, `test_settings_parity` skips (trim parity is covered by
 `test_settings_migration`).
 
 The current suite covers:
@@ -99,7 +95,13 @@ The current suite covers:
 - full backup rotation, snapshot protection, restore chains, archive naming,
   same-image scheduling, and scheduler continuity;
 - runtime monitoring parsers, thresholds, debounce, history, caching, and
-  authenticated HTTP endpoint behavior.
+  authenticated HTTP endpoint behavior;
+- the Kata runtime repair endpoint and the runtime path discovery;
+- log wiping, the MCP request log rotation, and the file-tool argv contract;
+- the VM-side MCP proxy client, the tool allow-list and the proxy tool;
+- SSH forwarder session expiry;
+- sandbox persistence semantics;
+- the vendored frontend assets and the fixed frontend defects.
 
 Run focused suites when changing a specific subsystem:
 
@@ -123,6 +125,16 @@ PYTHONPATH=src venv/bin/python -m unittest \
   tests.test_settings_runtime tests.test_settings_parity \
   tests.test_settings_migration tests.test_settings_http \
   tests.test_settings_styles -v
+```
+
+Focused suites for the proxy, file tools, logging and SSH:
+
+```bash
+PYTHONPATH=src venv/bin/python -m unittest \
+  tests.test_mcp_proxy tests.test_file_tools \
+  tests.test_logging_wipe tests.test_ssh_ttl \
+  tests.test_kata_repair tests.test_persistence_and_logging \
+  tests.test_frontend_assets -v
 ```
 
 Focused runtime monitoring suite:
@@ -360,6 +372,44 @@ journalctl --user-unit=sndbx.service --since '5 minutes ago' --no-pager \
   | grep -E -C 5 'ws_console|Traceback|WebSocket'
 ```
 
+A session without the `all` permission must be refused with the message
+"Full permissions are required to open a console."
+
+### 9.1 SSH session TTL check
+
+1. Open **Open SSH** for a running sandbox and note the allocated host port.
+2. Confirm the reservation is recorded:
+
+   ```bash
+   cat data/ssh_allocations.json
+   ```
+
+3. With `ssh.session_ttl` set to a short value (for example 120), wait for
+   the sweep to run and confirm the entry is gone and the `socat` process is
+   gone:
+
+   ```bash
+   cat data/ssh_allocations.json
+   pgrep -af 'socat TCP-LISTEN'
+   ```
+
+With `ssh.session_ttl` set to `0`, the reservation must survive until
+**Close SSH** is clicked.
+
+### 9.2 Log wipe check
+
+With `logging.wipe_period` and `logging.wipe_max_age` set to a short value,
+confirm that old entries disappear from `logs/all.log` and
+`logs/mcp_requests.jsonl` while recent entries stay:
+
+```bash
+ls -l logs/
+head -n 3 logs/all.log
+```
+
+The MCP request log is also rotated to `logs/mcp_requests.jsonl.1` when
+`logging.mcp_request_log_max_mb` is exceeded.
+
 ## 10. MCP Smoke Test
 
 Use the configured MCP host, port, and token. The standard endpoint is:
@@ -371,6 +421,44 @@ http://127.0.0.1:30081/mcp
 Send an authenticated `tools/list` request using the configured token and
 confirm an HTTP `200` response with the expected tool list. Do not execute
 state-changing MCP tools as part of a smoke test.
+
+### 10.1 MCP proxy smoke test
+
+The `mcp_proxy_call` tool forwards a call to an MCP server running inside a
+sandbox. It needs a sandbox that publishes an `mcp_bindings` entry — the
+`mcp-toolbox-1` sandbox of the `mcp_toolbox_1` image is the reference.
+
+1. Start the sandbox and confirm it is running.
+2. Confirm the backend ports are published on the host:
+
+   ```bash
+   docker port sndbbx-mcp-toolbox-1
+   ```
+
+3. Call the tool through the MCP endpoint with the toolbox envid:
+
+   ```bash
+   curl -s -X POST http://127.0.0.1:30081/mcp \
+     -H 'Content-Type: application/json' \
+     -H 'Authorization: Bearer test-token-123456789' \
+     -d '{
+       "jsonrpc": "2.0", "id": 1, "method": "mcp_proxy_call",
+       "envid": "mcp-toolbox-env-token",
+       "params": {
+         "backend_id": "filesystem",
+         "request": {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+       }
+     }'
+   ```
+
+Expected: `"success": true` and a `response` object whose `result.tools`
+lists the backend tools.
+
+4. Call a tool that the binding does not publish (when the allow-list is
+   restricted) and confirm it is refused instead of forwarded.
+
+If the proxy fails, check the log tag `mcp` for the transport error and
+confirm that the backend port is listening inside the guest.
 
 ## 11. Selected Sandbox Smoke Test
 

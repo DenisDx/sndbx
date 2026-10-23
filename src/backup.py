@@ -462,7 +462,7 @@ class BackupManager:
         if not self.backup_helper_path:
             self._ensure_within_backup_dir(snapshot_path, job.backup_dir)
 
-        archive_type = self._decide_archive_type(job)
+        archive_type = self._decide_archive_type(job, now)
         current = now or datetime.now(timezone.utc)
         archive_basename = _resolve_unique_basename(
             job.backup_dir,
@@ -678,10 +678,10 @@ class BackupManager:
             message="",
         )
 
-    def _decide_archive_type(self, job: BackupJob) -> str:
+    def _decide_archive_type(self, job: BackupJob, now: Optional[datetime] = None) -> str:
         """Return 'full' or 'incremental' for the next archive.
 
-        input: backup job
+        input: backup job and the reference time of this run
         output: archive type string
         """
         snapshot = job.backup_dir / f"{job.local_image_id}.snar"
@@ -692,9 +692,9 @@ class BackupManager:
         if latest_full is None:
             return "full"
 
-        now = datetime.now(timezone.utc)
+        reference = now or datetime.now(timezone.utc)
         elapsed_intervals = int(
-            (now - latest_full).total_seconds() // (job.settings.interval_hours * 3600)
+            (reference - latest_full).total_seconds() // (job.settings.interval_hours * 3600)
         )
         if elapsed_intervals >= job.settings.full_every:
             return "full"

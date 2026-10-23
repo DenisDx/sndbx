@@ -10,13 +10,27 @@ subject.
 |---|---|
 | `README.md` | Installation, configuration, Web UI, MCP and operations overview. |
 | `GETTING_STARTED.md` | First-run walkthrough for a new installation. |
-| `SPEC.md` | Project requirements and architecture. **Read-only for agents.** |
+| `SPEC_NEW.md` | **Developer and agent specification.** Purpose, architecture, domain model, component catalogue, configuration model, filesystem layout and engineering decisions. Supersedes `SPEC.md`. |
+| `SPEC.md` | Original project requirements and architecture. **Read-only for agents. Superseded by `SPEC_NEW.md`; kept for history.** |
 | `AGENTS.md` | Agent workflow and repository rules. **Read-only for agents.** |
 | `SPEC_.md` | Required corrections to the read-only `SPEC.md` (configuration locations and the settings tab). |
 | `TEST.md` | Unit, integration, smoke and browser test protocols. |
 | `MCP_USAGE.md` | MCP transport and tool usage. |
 | `MVP_SUMMARY.md` | Scope summary of the first delivered version. |
 | `SSH_SYNC_AND_SHARED_SETUP.md` | SSH and shared-directory setup notes. |
+
+## Specification topic documents
+
+`SPEC_NEW.md` is the entry point; these documents carry the depth for the
+largest subsystems. Each one is referenced from the relevant section of
+`SPEC_NEW.md`.
+
+| Document | Owns |
+|---|---|
+| `docs/IMAGES.md` | The image contract: `images/<id>` layout, `app.py` hook protocol, runtime contract, persistent data layout, the image catalogue, and how to add an image. |
+| `docs/INTERFACES.md` | Protocol reference: MCP HTTP/SSE, Web UI REST, console WebSocket, settings ASGI API, image hook, runtime contract, host configuration contract. |
+| `docs/HOST_OPERATIONS.md` | Host-side provisioning: prerequisite installer, application installer, service units, the `aiset` submodule dependency, Kata runtimes and the ACL variant, the privileged backup helper, host state inventory, known tooling defects. |
+| `docs/STATUS_AND_ROADMAP.md` | What is implemented, what is declared but not implemented, known defects, open tasks by priority, planned directions, and how to verify the current state. |
 
 ## Settings subsystem (aiset)
 

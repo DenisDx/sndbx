@@ -93,12 +93,13 @@ docker_cmd() {
     local rc
     errfile="$(mktemp)"
 
-    if docker "$@" 2>"$errfile"; then
+    docker "$@" 2>"$errfile"
+    rc=$?
+
+    if [[ "$rc" -eq 0 ]]; then
         rm -f "$errfile"
         return 0
     fi
-
-    rc=$?
 
     if grep -qiE "permission denied|got permission denied|cannot connect to the docker daemon" "$errfile"; then
         rm -f "$errfile"
@@ -147,13 +148,29 @@ fi
 log_info "Found Docker: $(docker --version)"
 
 # Kata
-KATA_SHIM="/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
+# The shim location depends on the --kata_path used by install_prerequisites.sh,
+# so read it from the Docker daemon configuration instead of assuming /opt/kata.
+KATA_SHIM="$(python3 - <<'PY'
+import json
+from pathlib import Path
+
+fallback = "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
+try:
+    config = json.loads(Path("/etc/docker/daemon.json").read_text(encoding="utf-8"))
+except Exception:
+    config = {}
+runtime = (config.get("runtimes") or {}).get("kata") or {}
+runtime_type = runtime.get("runtimeType")
+print(runtime_type.strip() if isinstance(runtime_type, str) and runtime_type.strip() else fallback)
+PY
+)"
 if [[ ! -x "$KATA_SHIM" ]]; then
-    log_error "Kata runtime not found. Please run ./install_prerequisites.sh first"
+    log_error "Kata runtime not found at $KATA_SHIM"
+    log_error "Please run ./install_prerequisites.sh first"
     exit 1
 fi
 
-log_info "Found Kata 4.1 runtime-rs shim"
+log_info "Found Kata 4.1 runtime-rs shim at $KATA_SHIM"
 
 # Verify Kata runtime is registered with Docker
 if ! docker_cmd run --rm --name kata-check --runtime kata alpine echo "OK" >/dev/null; then
@@ -174,13 +191,15 @@ SNDBX_ROOT="${SCRIPT_DIR}"
 SHARED_DIR="${SNDBX_ROOT}/shared"
 DATA_DIR="${SNDBX_ROOT}/data"
 LOG_DIR="${SNDBX_ROOT}/logs"
+SESSIONS_DIR="${SNDBX_ROOT}/sessions"
+BACKUP_DIR="${SNDBX_ROOT}/backup"
 
-mkdir -p "$SHARED_DIR" "$DATA_DIR" "$LOG_DIR"
-log_info "Created directories: shared, data, logs"
+mkdir -p "$SHARED_DIR" "$DATA_DIR" "$LOG_DIR" "$SESSIONS_DIR" "$BACKUP_DIR"
+log_info "Created directories: shared, data, logs, sessions, backup"
 
 # Ensure proper permissions
 chmod 755 "$SNDBX_ROOT"
-chmod 755 "$SHARED_DIR" "$DATA_DIR" "$LOG_DIR"
+chmod 755 "$SHARED_DIR" "$DATA_DIR" "$LOG_DIR" "$SESSIONS_DIR" "$BACKUP_DIR"
 
 # Check if .env needs to be created
 if [ ! -f "${SNDBX_ROOT}/.env" ]; then
@@ -211,12 +230,26 @@ log_info "LOG_LEVEL=$LOG_LEVEL"
 log_info "MCP_PORT=$MCP_PORT"
 log_info "MCP_HOST=$MCP_HOST"
 
-# Create Docker network for sandboxes (if needed)
-if ! docker_cmd network inspect sndbx-net &>/dev/null; then
-    log_info "Creating Docker network: sndbx-net"
-    docker_cmd network create sndbx-net --driver bridge
-else
-    log_info "Docker network sndbx-net already exists"
+# Initialise the aiset submodule; the configuration subsystem imports it from
+# <root>/aiset/src and it is not part of requirements.txt.
+if [ -f "${SNDBX_ROOT}/.gitmodules" ]; then
+    if command -v git >/dev/null 2>&1; then
+        log_info "Initialising git submodules (aiset)..."
+        if git -C "$SNDBX_ROOT" submodule update --init --recursive; then
+            log_info "Git submodules are ready"
+        else
+            log_warn "Could not initialise git submodules automatically"
+        fi
+    else
+        log_warn "git is not available; the aiset submodule was not initialised"
+    fi
+fi
+
+if [ ! -d "${SNDBX_ROOT}/aiset/src/aiset" ]; then
+    log_error "The aiset settings library is missing from ${SNDBX_ROOT}/aiset/src"
+    log_error "Run: git submodule update --init --recursive"
+    log_error "sndbx cannot start without it"
+    exit 1
 fi
 
 # Setup Python virtual environment and sync dependencies in venv

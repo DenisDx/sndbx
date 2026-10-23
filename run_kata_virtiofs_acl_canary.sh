@@ -7,9 +7,33 @@ if [[ ${EUID} -ne 0 ]]; then
     exit 2
 fi
 
-kata_config=/etc/kata-containers/configuration.toml
-kata_runtime=/usr/local/bin/kata-runtime
-image=denis-obsidian-assistant:latest
+kata_config=$(python3 - <<'PY'
+import json
+from pathlib import Path
+
+candidates = [
+    Path("/etc/kata-containers/runtime-rs/configuration.toml"),
+    Path("/etc/kata-containers/configuration.toml"),
+]
+try:
+    config = json.loads(Path("/etc/docker/daemon.json").read_text(encoding="utf-8"))
+except Exception:
+    config = {}
+runtime = (config.get("runtimes") or {}).get("kata") or {}
+options = runtime.get("options") or {}
+registered = options.get("ConfigPath")
+if isinstance(registered, str) and registered.strip():
+    print(registered.strip())
+else:
+    for path in candidates:
+        if path.is_file():
+            print(path)
+            break
+    else:
+        print(candidates[0])
+PY
+)
+image=${SNDBX_SMOKE_IMAGE:-denis-obsidian-assistant:latest}
 archive_url=https://github.com/kata-containers/kata-containers/releases/download/4.1.0/kata-static-4.1.0-amd64.tar.zst
 archive_sha256=3dc6b69c4acb787b967b04b64599a20d02a8beb1a8eaab3084110df9d0b08c96
 stage=$(mktemp -d /var/tmp/sndbx-kata-acl-canary-XXXXXX)
@@ -57,7 +81,6 @@ trap cleanup EXIT HUP INT TERM
 
 echo "canary=START"
 
-[[ -x $kata_runtime ]] || { echo "Kata runtime is unavailable" >&2; exit 1; }
 [[ -r $kata_config ]] || { echo "Kata config is unavailable" >&2; exit 1; }
 docker image inspect "$image" >/dev/null
 install --mode=0600 "$kata_config" "$backup"
@@ -105,7 +128,24 @@ content = add_list_value("valid_virtio_fs_daemon_paths", daemon_path)
 config_path.write_text(content, encoding="utf-8")
 PY
 
-"$kata_runtime" --config "$kata_config" check --no-network-checks
+python3 - "$kata_config" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+with path.open("rb") as handle:
+    config = tomllib.load(handle)
+
+runtime = config.get("runtime") or {}
+if not runtime.get("hypervisor_name"):
+    raise SystemExit("Kata configuration has no runtime.hypervisor_name")
+
+annotations = config.get("enable_annotations") or []
+for required in ("virtio_fs_extra_args", "virtio_fs_daemon"):
+    if required not in annotations:
+        raise SystemExit(f"Kata configuration does not enable the {required} annotation")
+PY
 echo "kata_config=VALID"
 
 setfacl --modify u:1002:rx "$test_share"

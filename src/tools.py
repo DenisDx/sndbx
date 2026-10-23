@@ -10,8 +10,15 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from logging_utils import get_logger
+from mcp_proxy import McpProxyError, VmMcpClient, tool_is_allowed
 
 logger = get_logger("mcp")
+
+
+READ_FILE_SCRIPT = 'tail -n +{offset} "$1"'
+READ_FILE_LIMIT_SCRIPT = 'tail -n +{offset} "$1" | head -n {limit}'
+WRITE_FILE_SCRIPT = 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"'
+READ_FILE_RAW_SCRIPT = 'cat -- "$1"'
 
 
 TOOL_CATALOG = [
@@ -226,12 +233,14 @@ class ToolHandlers:
 
         logger.info("tool_read_file sandbox=%s path=%s offset=%s limit=%s", sandbox_id, path, offset, limit)
 
-        # Construct the command to read the file with offset and limit
-        command = f'tail -n +{offset + 1} "{path}"'
         if limit is not None:
-            command += f' | head -n {limit}'
-
-        success, output = self.sandbox_manager.execute_command(sandbox_id, command)
+            script = READ_FILE_LIMIT_SCRIPT.format(
+                offset=int(offset) + 1, limit=int(limit)
+            )
+        else:
+            script = READ_FILE_SCRIPT.format(offset=int(offset) + 1)
+        argv = ["sh", "-c", script, "sh", path]
+        success, output = self.sandbox_manager.exec_argv(sandbox_id, argv)
         logger.info("tool_read_file finished sandbox=%s success=%s", sandbox_id, success)
 
         return {
@@ -267,10 +276,8 @@ class ToolHandlers:
         if not sandbox_id:
             return {"error": f"No sandbox for envid {envid}"}
         logger.info("tool_write_file sandbox=%s path=%s bytes=%s", sandbox_id, path, len(str(content)))
-        success, output = self.sandbox_manager.execute_command(
-            sandbox_id,
-            f'mkdir -p "$(dirname {path})" && cat > "{path}" << \'EOF\'\n{content}\nEOF',
-        )
+        argv = ["sh", "-c", WRITE_FILE_SCRIPT, "sh", path]
+        success, output = self.sandbox_manager.exec_argv(sandbox_id, argv, stdin_data=str(content))
         logger.info("tool_write_file finished sandbox=%s success=%s", sandbox_id, success)
         return {"success": success, "path": path, "sandbox_id": sandbox_id,
                 "message": "File written" if success else output}
@@ -346,30 +353,32 @@ class ToolHandlers:
 
     async def tool_mcp_proxy_call(self, params, envid, token):
         """
-        Proxy an MCP request to a VM backend.
+        Proxy a JSON-RPC call to an MCP backend published by the sandbox.
 
         Parameters:
         - params (dict):
-            - backend_id (str): The ID of the backend to proxy the request to. Optional.
-            - request (dict): The JSON-RPC object representing the request. Required.
-            - timeout_sec (int): The timeout for the request in seconds. Optional.
+            - backend_id (str): The backend identifier from mcp_bindings. If omitted, the first binding is used.
+            - request (dict): The JSON-RPC request object to forward to the selected backend.
+            - timeout_sec (number): Timeout in seconds for backend HTTP requests.
         - envid (str): The environment ID associated with the sandbox. Required.
         - token (str): The authentication token for the request. Required.
 
         Returns:
         dict: A dictionary containing:
+            - success (bool): Whether the call reached the backend.
             - response (dict): The proxied backend response payload.
             - error (str): Any error message if the proxy call fails.
         """
         sandbox_id = self._get_sandbox_for_envid(envid)
         if not sandbox_id:
-            return {"error": f"No sandbox for envid {envid}"}
+            return {"success": False, "error": f"No sandbox for envid {envid}"}
         logger.info("tool_mcp_proxy_call sandbox=%s backend_id=%s", sandbox_id, params.get("backend_id", ""))
 
         sandbox_cfg = self.sandbox_manager.sandbox_configs.get(sandbox_id, {})
         rows = sandbox_cfg.get("mcp_bindings", [])
         if not isinstance(rows, list) or not rows:
-            return {"error": f"No mcp_bindings configured for sandbox {sandbox_id}"}
+            return {"success": False,
+                    "error": f"No mcp_bindings configured for sandbox {sandbox_id}"}
 
         requested_backend_id = str(params.get("backend_id", "")).strip()
         selected = None
@@ -381,10 +390,63 @@ class ToolHandlers:
                 selected = row
                 break
         if not selected:
-            return {"error": f"Backend {requested_backend_id} not found in sandbox {sandbox_id}"}
+            return {"success": False,
+                    "error": f"Backend {requested_backend_id} not found in sandbox {sandbox_id}"}
 
-        # Perform the proxy call (implementation omitted for brevity)
-        return {"response": "Proxy call result (mocked)"}
+        request = params.get("request")
+        if not isinstance(request, dict) or not request:
+            return {"success": False, "error": "request must be a JSON-RPC object"}
+
+        allowed, blocked = tool_is_allowed(request, selected.get("tools"))
+        if not allowed:
+            return {"success": False,
+                    "error": f"Tool '{blocked}' is not published by this backend"}
+
+        try:
+            vm_port = int(selected.get("vm_port"))
+        except (TypeError, ValueError):
+            return {"success": False,
+                    "error": "Selected mcp_binding has no valid vm_port"}
+
+        endpoint = self.sandbox_manager.published_endpoint(sandbox_id, vm_port)
+        if endpoint is None:
+            container_ip = self.sandbox_manager.get_container_ip(sandbox_id)
+            if not container_ip:
+                return {"success": False,
+                        "error": f"Could not determine how to reach guest port {vm_port}"}
+            endpoint = (container_ip, vm_port)
+
+        auth_mode = str(selected.get("auth_mode", "token_passthrough")).strip()
+        forward_token = token if auth_mode == "token_passthrough" else None
+
+        try:
+            startup_timeout = float(selected.get("startup_timeout_sec", 10) or 10)
+        except (TypeError, ValueError):
+            startup_timeout = 10.0
+        try:
+            read_timeout = float(selected.get("read_timeout_sec", 30) or 30)
+        except (TypeError, ValueError):
+            read_timeout = 30.0
+        try:
+            request_timeout = float(params.get("timeout_sec", 0) or 0)
+        except (TypeError, ValueError):
+            request_timeout = 0.0
+        if request_timeout > 0:
+            read_timeout = request_timeout
+
+        client = VmMcpClient(
+            endpoint[0],
+            endpoint[1],
+            startup_timeout=startup_timeout,
+            read_timeout=read_timeout,
+        )
+        try:
+            response = await client.call(request, token=forward_token)
+        except McpProxyError as error:
+            return {"success": False, "error": str(error)}
+        except Exception as error:  # noqa: BLE001 - transport failure
+            return {"success": False, "error": f"proxy call failed: {error}"}
+        return {"success": True, "response": response}
 
     async def tool_patch_file(self, params, envid, token):
         """
@@ -422,27 +484,40 @@ class ToolHandlers:
 
         logger.info("tool_patch_file sandbox=%s file_path=%s", sandbox_id, file_path)
 
-        # Parse the patch content
         try:
             search_text, replace_text = self._parse_patch_content(patch_content)
-        except ValueError as e:
-            return {"error": str(e)}
+        except ValueError as error:
+            return {"error": str(error)}
 
-        # Construct the patch command
-        patch_command = (
-            f"python3 -c \"import sys; from pathlib import Path; "
-            f"file_path = Path('{file_path}'); "
-            f"content = file_path.read_text(encoding='{encoding}', errors='{errors}'); "
-            f"content = content.replace('''{search_text}''', '''{replace_text}'''); "
-            f"file_path.write_text(content, encoding='{encoding}', errors='{errors}')\""
+        read_ok, content = self.sandbox_manager.exec_argv(
+            sandbox_id,
+            ["sh", "-c", READ_FILE_RAW_SCRIPT, "sh", file_path],
+            encoding=encoding,
+            errors=errors,
         )
+        if not read_ok:
+            return {"success": False, "message": content.strip() or "Could not read the file"}
+        if search_text not in content:
+            return {
+                "success": False,
+                "message": "Patch search text was not found in the file",
+                "file_path": file_path,
+                "sandbox_id": sandbox_id,
+            }
 
-        success, output = self.sandbox_manager.execute_command(sandbox_id, patch_command)
-        logger.info("tool_patch_file finished sandbox=%s success=%s", sandbox_id, success)
+        patched = content.replace(search_text, replace_text, 1)
+        write_ok, write_output = self.sandbox_manager.exec_argv(
+            sandbox_id,
+            ["sh", "-c", WRITE_FILE_SCRIPT, "sh", file_path],
+            stdin_data=patched,
+            encoding=encoding,
+            errors=errors,
+        )
+        logger.info("tool_patch_file finished sandbox=%s success=%s", sandbox_id, write_ok)
 
         return {
-            "success": success,
-            "message": "Patch applied successfully" if success else output,
+            "success": write_ok,
+            "message": "Patch applied successfully" if write_ok else write_output,
             "file_path": file_path,
             "sandbox_id": sandbox_id
         }

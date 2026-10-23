@@ -11,7 +11,7 @@ import signal
 import threading
 
 from config import load_config
-from logging_utils import configure_logging, get_logger
+from logging_utils import configure_logging, get_logger, wipe_expired_logs
 from sandbox import DockerSandboxManager
 from mcp_server import MCPServer
 from tools import ToolHandlers, register_all_tools
@@ -31,6 +31,7 @@ class SNDBXApp:
         self.webui_server = None
         self.backup_manager = None
         self.backup_task = None
+        self.log_wipe_task = None
         self.settings_runtime = None
         self.logger = get_logger('core')
         self._install_exception_hooks()
@@ -108,11 +109,14 @@ class SNDBXApp:
                 self.webui_server.started_event.wait(),
             )
             self._init_backup_manager()
+            self._start_log_wiper()
             self.logger.info("Service startup completed")
 
             tasks = [mcp_task, webui_task]
             if self.backup_task is not None:
                 tasks.append(self.backup_task)
+            if self.log_wipe_task is not None:
+                tasks.append(self.log_wipe_task)
             await asyncio.gather(*tasks)
         
         except Exception as e:
@@ -253,6 +257,57 @@ class SNDBXApp:
             self.backup_manager.run_loop(), name="sndbx-backup-scheduler"
         )
 
+    def _log_wipe_settings(self) -> tuple[int, int]:
+        """Return the configured log wipe period and maximum age in seconds.
+
+        output: (period, max_age); both are 0 when wiping is disabled
+        """
+        logging_cfg = self.config.get("logging", {}) if isinstance(self.config, dict) else {}
+        try:
+            period = int(logging_cfg.get("wipe_period", 0) or 0)
+        except (TypeError, ValueError):
+            period = 0
+        try:
+            max_age = int(logging_cfg.get("wipe_max_age", period) or period)
+        except (TypeError, ValueError):
+            max_age = period
+        return max(0, period), max(0, max_age)
+
+    def _start_log_wiper(self):
+        """Start the background task that removes expired log entries."""
+        if self.log_wipe_task is not None:
+            return
+        self.log_wipe_task = asyncio.create_task(self._log_wipe_loop(), name="sndbx-log-wiper")
+
+    async def _log_wipe_loop(self):
+        """Remove log entries older than the configured age, on every period."""
+        while True:
+            period, max_age = self._log_wipe_settings()
+            if period > 0 and max_age > 0 and self.root_dir:
+                logs_dir = os.path.join(self.root_dir, "logs")
+                try:
+                    removed = await asyncio.to_thread(wipe_expired_logs, logs_dir, max_age)
+                except Exception as error:
+                    self.logger.warning("Log wipe failed: %s", error)
+                else:
+                    for name, count in removed.items():
+                        self.logger.info("Log wipe removed %d entries from %s", count, name)
+            await asyncio.sleep(max(period, 30))
+
+    async def _stop_log_wiper(self):
+        """Cancel the log wipe task if it is running."""
+        if self.log_wipe_task is None:
+            return
+        task = self.log_wipe_task
+        self.log_wipe_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            self.logger.warning("Log wiper stopped with error: %s", error)
+
     async def _stop_backup_scheduler(self):
         """Cancel the backup scheduler task if it is running."""
         if self.backup_task is None:
@@ -273,6 +328,7 @@ class SNDBXApp:
     async def stop(self):
         """Stop all services gracefully"""
         await self._stop_backup_scheduler()
+        await self._stop_log_wiper()
 
         if self.mcp_server:
             self.logger.info("Closing MCP server...")

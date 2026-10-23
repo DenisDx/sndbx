@@ -80,10 +80,10 @@ fi
 log_info ""
 log_warn "What would you like to remove?"
 echo ""
-echo "1. Configuration only (.env, config.json5) - Keep code and data"
+echo "1. Configuration only (.env, config.json5, config.json5.bak*) - Keep code and data"
 echo "2. Virtual environment only (venv/) - Keep configuration"
-echo "3. Data files only (logs/, data/, shared/) - Keep code and config"
-echo "4. Everything except git history"
+echo "3. Data files only (logs/, data/, shared/, sessions/, backup/) - Keep code and config"
+echo "4. Everything except git history and images/"
 echo "5. Nothing else (only remove service)"
 echo ""
 
@@ -94,6 +94,7 @@ case $CHOICE in
         log_info "Removing configuration files..."
         rm -f "${SCRIPT_DIR}/.env"
         rm -f "${SCRIPT_DIR}/config.json5"
+        rm -f "${SCRIPT_DIR}"/config.json5.bak*
         ;;
     2)
         log_info "Removing virtual environment..."
@@ -104,15 +105,20 @@ case $CHOICE in
         rm -rf "${SCRIPT_DIR}/logs"
         rm -rf "${SCRIPT_DIR}/data"
         rm -rf "${SCRIPT_DIR}/shared"
+        rm -rf "${SCRIPT_DIR}/sessions"
+        rm -rf "${SCRIPT_DIR}/backup"
         ;;
     4)
-        log_info "Removing all sndbx files except git history..."
+        log_info "Removing all sndbx files except git history and images..."
         rm -f "${SCRIPT_DIR}/.env"
         rm -f "${SCRIPT_DIR}/config.json5"
+        rm -f "${SCRIPT_DIR}"/config.json5.bak*
         rm -rf "${SCRIPT_DIR}/venv"
         rm -rf "${SCRIPT_DIR}/logs"
         rm -rf "${SCRIPT_DIR}/data"
         rm -rf "${SCRIPT_DIR}/shared"
+        rm -rf "${SCRIPT_DIR}/sessions"
+        rm -rf "${SCRIPT_DIR}/backup"
         rm -f "${SCRIPT_DIR}/__pycache__"
         rm -rf "${SCRIPT_DIR}/src/__pycache__"
         ;;
@@ -123,6 +129,27 @@ case $CHOICE in
         log_warn "Invalid choice, skipping file removal"
         ;;
 esac
+
+# The privileged backup helper lives outside the checkout and needs root.
+if [[ -f /usr/local/libexec/sndbx-backup-helper || -f /etc/sudoers.d/sndbx-backup-helper ]]; then
+    log_info ""
+    log_warn "A privileged backup helper is installed on this host:"
+    log_warn "  /usr/local/libexec/sndbx-backup-helper"
+    log_warn "  /etc/sndbx-backup-helper/"
+    log_warn "  /etc/sudoers.d/sndbx-backup-helper"
+    log_warn "  /var/lib/sndbx-backup/"
+    read -p "Remove the backup helper and its sudoers rule? (y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        sudo rm -f /usr/local/libexec/sndbx-backup-helper
+        sudo rm -rf /etc/sndbx-backup-helper
+        sudo rm -f /etc/sudoers.d/sndbx-backup-helper
+        sudo rm -rf /var/lib/sndbx-backup
+        log_info "Removed the backup helper"
+    else
+        log_info "Keeping the backup helper; remove it manually if needed"
+    fi
+fi
 
 # Remove Docker network if needed
 if docker network inspect sndbx-net &>/dev/null; then

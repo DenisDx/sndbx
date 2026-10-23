@@ -9,6 +9,7 @@ docker_config=/etc/docker/daemon.json
 legacy_config=/etc/kata-containers/configuration.toml
 candidate_config=/etc/kata-containers/runtime-rs/configuration-acl.toml
 runtime_config=/etc/kata-containers/runtime-rs/configuration.toml
+smoke_image=${SNDBX_SMOKE_IMAGE:-denis-obsidian-assistant:latest}
 stage=
 promoted=false
 docker_changed=false
@@ -88,7 +89,7 @@ jq --arg shim "$legacy_bundle/runtime-rs/bin/containerd-shim-kata-v2" --arg conf
 docker_changed=true
 systemctl reload docker
 docker info --format '{{json .Runtimes}}' | jq -e '.kata != null and ."kata-acl" == null' >/dev/null
-docker run --rm --pull never --runtime kata --entrypoint /bin/true denis-obsidian-assistant:latest
+docker run --rm --pull never --runtime kata --entrypoint /bin/true "$smoke_image"
 
 rm -f -- "$legacy_config" "$candidate_config" /usr/local/bin/kata-runtime
 ln -sfn "$legacy_bundle/runtime-rs/bin/containerd-shim-kata-v2" /usr/local/bin/containerd-shim-kata-v2
