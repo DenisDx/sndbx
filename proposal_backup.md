@@ -152,6 +152,10 @@ an archive breaks restoration of later changes in that chain.
 
 ## Required Follow-up Work After Implementation Review
 
+> **Status: implemented.** All nine items below were delivered and are covered
+> by the focused backup suite (44 tests). The text is kept as the review
+> record. See also §"Additional Follow-up Work After Re-Review".
+
 The backup feature is implemented: `BackupManager`, the sndbx background task,
 per-VM configuration, documentation, and 30 focused unit tests are present.
 The review found the following required corrections before relying on backup
@@ -238,6 +242,11 @@ chains for recovery.
    image directory.
 
 ## Additional Follow-up Work After Re-Review
+
+> **Status: implemented.** The scheduler now keeps one canonical job per
+> `local_image_id` and records the duplicate sandbox as sharing the schedule;
+> the async lock is keyed by `local_image_id`. The text is kept as the review
+> record.
 
 The original nine follow-up items have been implemented and covered by the
 current focused backup suite: scheduler continuity, fresh and protected

@@ -1091,6 +1091,9 @@ code does not implement. Agents reading `SPEC.md` will get these wrong.
 | `ssh.session_ttl` | **Implemented.** The forwarder is released after the TTL; `0` keeps it until it is closed manually. |
 | `webui.auth.mode` alternatives | Only `"login"` is implemented. |
 
+Each row above has a task id or an explicit decision in
+[`docs/STATUS_AND_ROADMAP.md` §2, §3 and §5](docs/STATUS_AND_ROADMAP.md#5-open-tasks-by-priority).
+
 ---
 
 ## 8. Operations

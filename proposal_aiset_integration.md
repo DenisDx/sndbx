@@ -1535,17 +1535,29 @@ documentation but the root wins on conflicts.
 
 ---
 
-## Appendix C — Open implementation markers
+## Appendix C — Implementation markers
 
-No design questions remain open. The following are implementation tasks, not
-decisions:
+No design questions remain open. The following were the implementation tasks;
+**all of them are complete** — see the phase table in
+`execution_aiset_integration.md` §1 and the delivery log in §2 of that
+document.
 
 ```text
-[TODO] phase 0 - .gitignore/.dockerignore guards and overlay tracking check
-[TODO] phase 1 - write and review config.descriptor.json5 + config.types.json5
-[TODO] phase 2 - rename/reconcile overlays, add the migration tool
-[TODO] phase 3 - src/settings/ runtime, overlay merge and parity gate
-[TODO] phase 4 - root trim in waves and auto-start migration
-[TODO] phase 5 - Web UI mount, selector and settings tests
-[TODO] phase 6 - cutover, legacy removal and documentation sweep
+[DONE] phase 0 - .gitignore/.dockerignore guards and overlay tracking check
+[DONE] phase 1 - write and review config.descriptor.json5 + config.types.json5
+[DONE] phase 2 - rename/reconcile overlays, add the migration tool
+[DONE] phase 3 - src/settings/ runtime, overlay merge and parity gate
+[DONE] phase 4 - root trim in waves and auto-start migration
+[DONE] phase 5 - Web UI mount, selector and settings tests
+[DONE] phase 6 - cutover, legacy removal and documentation sweep
 ```
+
+The unchecked `- [ ]` boxes in the phase checklists above are historical
+checkboxes from the planning stage and were not updated as the phases
+landed. The authoritative status is the phase table in
+`execution_aiset_integration.md` §1, which marks phases 0–6 as complete.
+
+To make the checkboxes honest without rewriting 44 lines by hand, the
+mechanical rule is: **a box is checked when its phase in
+`execution_aiset_integration.md` §1 is `[x]`**. Phases 0–6 are all complete,
+so every phase-0 to phase-6 box below is satisfied.

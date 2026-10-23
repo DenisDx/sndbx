@@ -41,15 +41,17 @@ A short list, so an agent can tell quickly what it may rely on.
 
 Configuration keys that exist in the schema and are read by the code, but
 whose promised behaviour does not exist. An agent must not assume these work.
+The last column links each key to its task in §5 or records the decision not
+to build it.
 
-| Key | Promise | Reality |
-|---|---|---|
-| `network_traffic_max` | Per-VM traffic quota | Config-only placeholder. No accounting, no enforcement. The descriptor says so explicitly. |
-| `disk_max` | Writable-layer size cap | Passed as `--storage-opt size=`; silently dropped when the storage driver rejects it. Under Kata/VirtioFS the quota is generally not enforceable. |
-| `mcp.items[]` | Multi-backend support | Reserved, empty, unused. |
-| `webui.auth.mode` | Multiple auth modes | Only `"login"` is implemented. |
-| `webui.auth.users[].permissions` | Fine-grained permissions | Only `"all"` (full access) and "anything else" (read-only viewer) are distinguished. There is no per-tool policy engine. |
-| `envids` lifecycle | Create/revoke envids dynamically | Static entries only. Revocation = edit the config and restart. |
+| Key | Promise | Reality | Task / decision |
+|---|---|---|---|
+| `network_traffic_max` | Per-VM traffic quota | Config-only placeholder. No accounting, no enforcement. The descriptor says so explicitly. | **T13** — needs a cgroup or nftables accounting layer; no demand yet. |
+| `disk_max` | Writable-layer size cap | Passed as `--storage-opt size=`; silently dropped when the storage driver rejects it. Under Kata/VirtioFS the quota is generally not enforceable. | **T10** — blocked on Kata/VirtioFS support. |
+| `mcp.items[]` | Multi-backend support | Reserved, empty, unused. | **No task.** Reserved for a second MCP backend; the single built-in backend does not need it. |
+| `webui.auth.mode` | Multiple auth modes | Only `"login"` is implemented. | **T14** — a second mode (for example token or OIDC) needs a design first. |
+| `webui.auth.users[].permissions` | Fine-grained permissions | Only `"all"` (full access) and "anything else" (read-only viewer) are distinguished. There is no per-tool policy engine. | **T6** — the policy engine for MCP tokens and the Web UI share the same model. |
+| `envids` lifecycle | Create/revoke envids dynamically | Static entries only. Revocation = edit the config and restart. | **T7** — needs an API and a state store. |
 
 The following keys used to be in this list and are now implemented:
 `logging.wipe_period` / `wipe_max_age` / `mcp_request_log_max_mb`,
@@ -58,19 +60,20 @@ The following keys used to be in this list and are now implemented:
 ## 3. Features from the original design that were never built
 
 `SPEC.md` describes an ambitions that the code does not implement. Listed so
-that nobody re-discovers them by reading the old document.
+that nobody re-discovers them by reading the old document. The last column
+links each feature to its task in §5 or records why it will not be built.
 
-| Feature | Status | Note |
-|---|---|---|
-| Per-tool ACL matrix (`permissions: ["all"]` plus per-tool restrictions) | Not built | The MCP authorization model is "valid token + envid in the user's list". |
-| `request_ssh_access` / `release_ssh_access` MCP tools | Not built | SSH is a Web UI action, not an MCP tool. |
-| Dynamic envid creation ("create a new instance on demand") | Not built | — |
-| `network.internet` / `network.local` iptables control | Not built | Networking is plain Docker NAT. |
-| Files tab (browse/download the shared directory) | Not built | The Web UI has Dashboard, Settings, Console and MCP-test tabs. |
-| Console tunneled through MCP | Not built | The console uses a dedicated WebSocket PTY bridge. A full interactive terminal cannot be a request/response MCP tool. |
-| `firecracker` as the mandatory VMM | Optional | The shipped Kata configuration uses QEMU; Kata also bundles Firecracker. |
-| Multi-host / multi-instance management | Out of scope | One manager per host. |
-| Sandboxed "users" inside the guest | Not built | Guests run as root (or a single application user). |
+| Feature | Status | Note | Task / decision |
+|---|---|---|---|
+| Per-tool ACL matrix (`permissions: ["all"]` plus per-tool restrictions) | Not built | The MCP authorization model is "valid token + envid in the user's list". | **T6** |
+| `request_ssh_access` / `release_ssh_access` MCP tools | Not built | SSH is a Web UI action, not an MCP tool. | **T12** |
+| Dynamic envid creation ("create a new instance on demand") | Not built | — | **T7** |
+| `network.internet` / `network.local` iptables control | Not built | Networking is plain Docker NAT. | **T9** |
+| Files tab (browse/download the shared directory) | Not built | The Web UI has Dashboard, Settings, Console and MCP-test tabs. | **T8** |
+| Console tunneled through MCP | Not built | The console uses a dedicated WebSocket PTY bridge. | **Will not be built.** A full interactive terminal cannot be expressed as a request/response MCP tool. |
+| `firecracker` as the mandatory VMM | Optional | The shipped Kata configuration uses QEMU; Kata also bundles Firecracker. | **No task.** Firecracker stays optional; switching the VMM is a Kata configuration change. |
+| Multi-host / multi-instance management | Out of scope | One manager per host. | **Out of scope.** The `instance` field is a label, not an isolation mechanism. |
+| Sandboxed "users" inside the guest | Not built | Guests run as root (or a single application user). | **Will not be built.** Guest-side user management belongs to the image, not to the manager. |
 
 ---
 
@@ -96,7 +99,7 @@ table is kept as a record of what was wrong and what replaced it.
 
 ### 4.2 Test-suite baseline
 
-The suite is green: **193 tests, 1 skip** (the parity test skips when the live
+The suite is green: **196 tests, 1 skip** (the parity test skips when the live
 root is trimmed, which is covered by `test_settings_migration`).
 
 The three `test_backup` failures that used to reproduce at `HEAD` are gone.
@@ -116,13 +119,49 @@ All recorded defects are fixed; see
 |---|---|
 | `SPEC.md` | **Superseded** by `SPEC_NEW.md`. Describes the pre-aiset, two-file configuration model and several unbuilt features. Kept for history. |
 | `SPEC_.md` | Holds the corrections that would be required in `SPEC.md`. Still accurate as a record, but the corrections are now embodied in `SPEC_NEW.md`. |
-| `README.md` | Accurate for installation and operation; its "Next Steps" section lists features that already exist (Web UI dashboard, SSH pool, persistence). |
+| `README.md` | Accurate for installation and operation. Its "Next Steps" section was replaced by "Current Feature Set", which lists the current features and the remaining roadmap. |
 | `MVP_SUMMARY.md`, `GETTING_STARTED.md` | Describe the MVP. Accurate as history, incomplete as current documentation. |
 | `.env.example` | Reconciles with the configuration template: the dead `VM_ID`, `VM_SSH_USER`, `VM_SSH_PORT_RANGE_START` and `VM_SSH_PORT_RANGE_END` are gone, and `SNDBX_INSTANCE`, `LOG_TIMEZONE` and the log-management variables are declared. |
+
+### 4.5 Where the other finding records live
+
+This document is the task registry, but the other finding records live
+elsewhere. Read them together:
+
+| Record | Owns |
+|---|---|
+| [`SPEC_NEW.md` §7.3](../SPEC_NEW.md#73-decisions-that-were-not-implemented-the-same-way) | Every point where the original `SPEC.md` and the code disagree. §2 and §3 of this document are the same findings seen from the task side. |
+| [`HOST_OPERATIONS.md` §9](HOST_OPERATIONS.md#9-known-defects-in-the-host-tooling) | The twelve host-tooling defects and their fixes. |
+| [`IMAGES.md` §7.2](IMAGES.md#72-common-pitfalls) | The failure modes of a new image and how to avoid them. |
+| [`proposal_monitoring.md` §14](../proposal_monitoring.md) | The monitoring design. Its deliberate deferrals are tracked here as **T15**, **T16**, **T17** and **T10**. |
+| [`proposal_aiset_integration.md`](../proposal_aiset_integration.md) | The settings design. Its phase markers are historical; the phase status is in `execution_aiset_integration.md` §1. |
+| [`execution_aiset_integration.md`](../execution_aiset_integration.md) | The settings delivery log, including the live rollout and the resolved deviations. |
+| [`proposal_backup.md`](../proposal_backup.md) | The backup design. Its two follow-up sections are historical records of delivered work. |
+| `images/clawvm/proposal_vmupdate1.md` | Owned by the `clawvm` image repository. Its open decisions are tracked here as **T18**. |
+| `images/langvm/proposal_langvm_update.md` | Owned by the `langvm` image repository. Its deferrals are tracked there, not here. |
+
+**Rule for the registry.** Every open item gets a task id in §5, or an entry
+in §"Not planned", and the document that raised it is linked from the task.
+A finding that lives only in a proposal document is not finished bookkeeping.
+
+**What counts as an open item.** Three kinds, and all three are registered
+here:
+
+1. **Work** — a task with an id (**T1**–**T18**) in §5.
+2. **A decision still to be made** — a question with an id (**D1**–**D4**) in
+   §"Open design questions". These are not work items; they await a choice.
+3. **A deliberate omission** — a row in §"Not planned".
+
+Anything that is neither working, undecided, nor deliberately dropped is not
+open. The sources that feed this registry are indexed in §4.5; a sweep of
+them must not surface an item that is missing here.
 
 ---
 
 ## 5. Open tasks, by priority
+
+Every task has an id. The ids are referenced from §2 and §3 so that no finding
+is left without a task or an explicit decision.
 
 ### P0 — correctness and safety
 
@@ -130,24 +169,59 @@ Nothing outstanding. The P0 list is empty as of 2026-10-23.
 
 ### P1 — completeness
 
-| Task | Notes |
-|---|---|
-| Vendor the remaining third-party frontend assets, or move the whole frontend to a bundler. | Only xterm.js is vendored so far; the rest of the UI has no external dependencies. |
-| Extend `uninstall.sh` to remove the `kata-acl` runtime and the `aiset` submodule. | Both are host-level or VCS-level state; the removal needs an explicit confirmation. |
-| Add a live check for `mcp_proxy_call` against the `mcp_toolbox_1` image. | The proxy is unit-tested against a fake backend; the toolbox sandbox is stopped in the reference installation, so the live path was not exercised. |
-| Reconcile `README.md`'s "Next Steps" section with the current feature set. | It still lists the Web UI dashboard, the SSH pool and persistence as future work. |
+| Id | Task | Notes |
+|---|---|---|
+| T1 | Vendor the remaining third-party frontend assets, or move the whole frontend to a bundler. | Only xterm.js is vendored so far; the rest of the UI has no external dependencies. |
+| T2 | Extend `uninstall.sh` to remove the `kata-acl` runtime and the `aiset` submodule. | Both are host-level or VCS-level state; the removal needs an explicit confirmation. |
+| T3 | Add a live check for `mcp_proxy_call` against the `mcp_toolbox_1` image. | The proxy is unit-tested against a fake backend; the toolbox sandbox is stopped in the reference installation, so the live path was not exercised. |
+| T4 | Clean up the inherited `aibusiness` compose file. | `images/aibusiness/docker-compose.yml` still names `image: langvm:latest` and `container_name: langvm-app`. Owned by the image repository, not by the root repository. |
+| T5 | Give the `denis_obsidian_assistant` fork a clean history path. | It still points at the `clawvm` upstream and carries uncommitted local customizations. It must never be committed or pushed as-is; the local changes are intentional. |
 
 ### P2 — product
 
-| Task | Notes |
+| Id | Task | Notes |
+|---|---|---|
+| T6 | Per-tool authorization. | The MCP server has the token, the envid and the tool name at the moment of dispatch (`src/mcp_server.py:425-433`) — that is exactly where a policy hook belongs. `webui.auth.users[].permissions` would need to be mirrored into `users.items[].permissions` or read from a separate policy document. |
+| T7 | Dynamic envid creation and revocation. | Requires an API and a state store; the envid map is currently static configuration. |
+| T8 | Files tab for the shared directory. | The old SPEC suggested reusing an existing component rather than building one. |
+| T9 | Per-VM network policy (`network.internet`, `network.local`). | Host-side iptables rules keyed by the sandbox id; the container's IP is already discoverable (`get_container_ip`). |
+| T10 | Per-VM disk quota enforcement. | Requires a Kata configuration that supports it; the current VirtioFS profile does not expose a reliable per-VM percentage. |
+| T11 | Frontend tests. | The suite is entirely Python. `tests/test_settings_styles.py` only checks asset order, CSS scoping and DOM ids. |
+| T12 | MCP tools to open and close SSH access. | The port pool exists and is now TTL-bounded, but it is only reachable from the Web UI. Exposing it as MCP tools would let an agent claim a sandbox directly. |
+| T13 | Per-VM traffic accounting (`network_traffic_max`). | Needs a cgroup or nftables accounting layer that reports per-sandbox usage. Until then the key stays a documented placeholder; it must not be read as a quota. |
+| T14 | Additional Web UI auth modes (`webui.auth.mode`). | Only `"login"` works. A second mode (token, OIDC, reverse-proxy headers) needs a design and a principal mapping first. |
+| T15 | Always-on server sampler with persistent metric history. | Deferred by `proposal_monitoring.md` §14. Today metrics exist only while a Web UI user has switched monitoring on, and the 120-sample history is lost on restart. Needs a background sampler and a store. |
+| T16 | Configurable monitoring thresholds. | Deferred by `proposal_monitoring.md` §14. The thresholds are hard-coded constants in `src/monitoring.py`. |
+| T17 | Browser notifications for monitoring alerts. | Deferred by `proposal_monitoring.md` §14. |
+| T18 | Resolve the OpenClaw native-service decisions. | `images/clawvm/proposal_vmupdate1.md` §11 lists seven open decisions (systemd delegation, user-manager-only arrangement, native update ownership, the conventional VM backend, read-only root, guest-local database state, acceptable host changes). The document is owned by the `clawvm` image repository; the root repository only tracks the outcome. |
+
+### Open design questions (awaiting a decision)
+
+These are not work items but decisions that are still open. Each one is
+referenced from the "Planned directions" section that raises it.
+
+| Id | Question | Raised by | Notes |
+|---|---|---|---|
+| D1 | How to version the *interface* between an image and sndbx — the hook contract and the runtime contract — so that a newer image can rely on a newer sndbx and vice versa. | §6.2 | Today the contracts are implicit in `src/sandbox.py` and in each `app.py`. |
+| D2 | Whether `mcp_bindings` should become the standard way for an image to expose its own MCP tools to the host. | §6.2 | `mcp_toolbox_1` is the only image that uses it today. |
+| D3 | Whether sndbx should keep supporting host ACL semantics at all, or move to a model where guest-owned files never need host ACLs — for example by owning the data directory through a dedicated host user with a fixed uid. | §6.4 | The `posix-acl-compat` profile and the per-container annotation are the current answer. |
+| D4 | Whether the `aiset` library should gain the two capabilities sndbx needs from it: an MCP adapter and a lifecycle-hook dispatcher. | §6.1 | Both are known gaps in `aiset` itself, not in sndbx. `aiset` is a pinned submodule, so the work happens upstream. |
+
+### Not planned
+
+Recorded so that the absence is a decision rather than an oversight.
+
+| Item | Decision |
 |---|---|
-| Per-tool authorization. | The MCP server has the token, the envid and the tool name at the moment of dispatch (`src/mcp_server.py:425-433`) — that is exactly where a policy hook belongs. `webui.auth.users[].permissions` would need to be mirrored into `users.items[].permissions` or read from a separate policy document. |
-| Dynamic envid creation and revocation. | Requires an API and a state store; the envid map is currently static configuration. |
-| Files tab for the shared directory. | The old SPEC suggested reusing an existing component rather than building one. |
-| Per-VM network policy (`network.internet`, `network.local`). | Host-side iptables rules keyed by the sandbox id; the container's IP is already discoverable (`get_container_ip`). |
-| Per-VM disk quota enforcement. | Requires a Kata configuration that supports it; the current VirtioFS profile does not expose a reliable per-VM percentage. |
-| Frontend tests. | The suite is entirely Python. `tests/test_settings_styles.py` only checks asset order, CSS scoping and DOM ids. |
-| MCP tools to open and close SSH access. | The port pool exists and is now TTL-bounded, but it is only reachable from the Web UI. Exposing it as MCP tools would let an agent claim a sandbox directly. |
+| Tunneling the console through MCP | A full interactive terminal cannot be expressed as a request/response MCP tool. The console keeps its own WebSocket. |
+| Multi-host or multi-instance management | Out of scope: one manager per host. `instance` is a label, not an isolation mechanism. |
+| Guest-side user management | Belongs to the image, not to the manager. Guests run as root or as a single application user. |
+| Making Firecracker the mandatory VMM | Firecracker stays optional. Switching the VMM is a Kata configuration change, not a manager feature. |
+| `mcp.items[]` multi-backend support | Reserved for a second MCP backend. The single built-in backend does not need it. |
+| A `SNDBX_SETTINGS_BACKEND=legacy\|aiset` switch | The dual-backend flag was planned in `proposal_aiset_integration.md` and never built. The decision was to cut over to aiset directly; the legacy loader was removed. A fallback switch would reintroduce the dead path. |
+| Applying the `SPEC_.md` corrections to `SPEC.md` | `SPEC.md` is read-only for agents, so the two recorded corrections can never be applied by an agent. They are embodied in `SPEC_NEW.md` instead; `SPEC.md` stays as history. |
+| Managed per-run workspace/artifact volumes, an asynchronous job/event bridge, egress profiles, ingress allow-lists and platform-wide secret storage | Deferred by `proposal_langvm_update.md` §"Explicitly Deferred". That document belongs to the `langvm` image repository, so the items are tracked there and not in this registry. |
+| Per-VM disk quotas in the monitoring view | **T10** — the disk quota itself. The monitoring display of it is part of the same work. |
 
 ---
 
@@ -168,7 +242,7 @@ The intended direction:
 - keep the descriptor as the single source of truth for configuration shape;
 - keep the root/overlay split, because it makes image repositories portable;
 - extend `aiset` with capabilities sndbx needs (the MCP adapter and the
-  lifecycle-hook dispatcher are the two known gaps in `aiset` itself);
+  lifecycle-hook dispatcher are the two known gaps in `aiset` itself) — **D4**;
 - treat the Settings tab as the only configuration editor — no second path.
 
 ### 6.2 Images as independent, versioned products
@@ -178,13 +252,13 @@ intended direction is that an image can be released on its own cadence, that
 `sndbx` consumes it through the `full_update` path, and that the overlay is
 the contract between the image and the host.
 
-Open design questions:
+Open design questions, registered in §5 as **D1** and **D2**:
 
 - How to version the *interface* between an image and sndbx (the hook
   contract, the runtime contract) so that a newer image can rely on a newer
-  sndbx.
+  sndbx. — **D1**
 - Whether `mcp_bindings` should become the standard way to expose an image's
-  own MCP tools to the host.
+  own MCP tools to the host. — **D2**
 
 ### 6.3 Observability
 
@@ -197,7 +271,7 @@ The `mcp_requests.jsonl` volume and the missing log wipe were the immediate
 operational problems; both are now addressed — the request log has a size cap
 and an age-based rotation, and the log files are wiped on a configurable
 period. The remaining question is whether the per-VM metrics should be
-persisted.
+persisted; that is **T15**.
 
 ### 6.4 Isolation depth
 
@@ -207,7 +281,7 @@ propagate through VirtioFS when submounts are announced. The
 answer. The longer-term question is whether sndbx should keep supporting
 host ACL semantics at all, or move to a model where guest-owned files never
 need host ACLs — for example by owning the data directory through a
-dedicated host user with a fixed uid.
+dedicated host user with a fixed uid. Registered as **D3**.
 
 ### 6.5 Multi-agent integration
 
@@ -217,7 +291,7 @@ boundary should move up: an agent that can `rm -rf` its own sandbox is
 contained, but an agent that can reach the *manager* API can start other
 sandboxes. A policy layer that limits which sandboxes a given token can
 *manage* (not merely *use*) would close that gap — it is the same work as
-§6.2 of the P2 list.
+**T6** in the P2 list.
 
 ---
 

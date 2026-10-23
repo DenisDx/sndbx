@@ -223,12 +223,16 @@ every root sandbox to `{run_at_startup}`: **0 differences**.
    validates the result; the runtime never edits configuration sources.
 4. **Legacy auto-start import.** It is automatic on the first aiset start
    (with a `.migrated` rename), with an in-memory fallback if the write fails.
-5. **Live trim deferred.** The code and tool are complete and verified, but the
-   live `config.json5` is unchanged because the old service is running.
+5. **Live trim deferred — resolved on 2026-10-22.** The code and tool are
+   complete and verified, but the live `config.json5` is unchanged because the
+   old service is running. The live trim was executed later the same day; see
+   §5.
 6. **Facade module.** `src/settings/facade.py` was unnecessary; `src/config.py`
    is the facade.
-7. **Pre-existing backup failures.** The 3 failing backup tests are unrelated
-   and reproduce at `HEAD`.
+7. **Pre-existing backup failures — resolved on 2026-10-23.** The 3 failing
+   backup tests were unrelated to the settings work and reproduced at `HEAD`.
+   Their cause was `_decide_archive_type()` using `datetime.now()` instead of
+   the run's reference time; they now pass.
 
 ## 5. Live rollout and routine operations
 
