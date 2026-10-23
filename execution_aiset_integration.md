@@ -9,7 +9,7 @@ operational step.
 
 Status legend: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
 
-Pinned aiset revision: `11d8838efe9e5cc447a9211c655a431fab810e8e` (`0.1.0`).
+Pinned aiset revision: `cbb74c7d8cc1a1f3bb10f0661f6bc00514982cab` (`0.1.0`).
 
 ## 1. Phase status
 
@@ -163,6 +163,25 @@ Pinned aiset revision: `11d8838efe9e5cc447a9211c655a431fab810e8e` (`0.1.0`).
 - `config.json5.example` documents the overlay model.
 - `SPEC_.md` records the required changes to the read-only `SPEC.md`: the
   three configuration locations and the aiset-backed Settings tab.
+
+### 2026-10-23 - aiset search and sticky path strip
+
+- Advanced the `aiset` submodule from `11d8838` to `cbb74c7` (`search and
+  sticky bar`).
+- The feature is delivered entirely by the mounted library assets, so the host
+  needed no JavaScript change: `aiset.mountTree` now renders
+  `aiset-tree-topbar` with the search field and the visible-path line, and the
+  existing `#settings-tree` scroll container makes the strip sticky.
+- The host has no "show absent" checkbox, so the demo2 `viewchange` sync is
+  not required. Search still enables show-absent internally to reveal a
+  declared but unwritten key.
+- Added a scroll-container regression check and an asset-contract check to
+  `tests/test_settings_styles.py`; extended the Settings browser protocol in
+  `TEST.md`.
+- Tests: settings suites pass; the library's `tests/test_ui_assets.py` passes
+  (`14 passed`).
+- The parent repository gitlink is intentionally left unstaged, as requested
+  for Git operations; commit the advanced submodule pointer separately.
 
 ## 3. Verification
 

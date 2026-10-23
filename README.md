@@ -584,7 +584,7 @@ The `config.json5` file defines sandboxes, users, and MCP settings:
 ### Settings Library (aiset)
 
 Configuration is owned by the pinned [`aiset`](https://github.com/DenisDx/aiset)
-submodule at `11d8838efe9e5cc447a9211c655a431fab810e8e` (`0.1.0`). Do not edit
+submodule at `cbb74c7d8cc1a1f3bb10f0661f6bc00514982cab` (`0.1.0`). Do not edit
 files inside `aiset/` from this repository; advance the submodule instead.
 
 Two kinds of document are loaded:

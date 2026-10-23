@@ -212,6 +212,11 @@ Settings acceptance in a browser:
    (404, not the SPA).
 7. Log in without `permissions: ["all"]`; the editor is read-only and secret
    subtrees are denied.
+8. Type a key, scalar-value or description fragment into the search field; pick
+   a deep result and confirm every ancestor expands, the row scrolls into view,
+   receives focus and is highlighted.
+9. Scroll a long document; the line under the search field names the full path
+   to the topmost visible row and stays visible with the search field.
 
 
 ## 5. Backup Smoke Test

@@ -73,6 +73,31 @@ process.stdout.write(JSON.stringify(window.aiset.classes()));
         self.assertIn('id="settings-tree"', html)
         self.assertIn('id="settings-document"', html)
 
+    def test_tree_host_is_scroll_container(self) -> None:
+        """The sticky search strip needs a scrolling mount host above the tree."""
+        css = (FRONTEND / "settings.css").read_text(encoding="utf-8")
+        match = re.search(r"#settings-tree\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(match)
+        block = match.group(1)
+        self.assertIn("overflow: auto", block)
+        self.assertIn("max-height", block)
+
+    def test_served_assets_include_search_and_context(self) -> None:
+        """Catch a submodule rollback that drops the search/sticky contract."""
+        tree_js = ROOT / "aiset" / "src" / "aiset" / "assets" / "aiset-tree.js"
+        library_css = ROOT / "aiset" / "src" / "aiset" / "assets" / "aiset.css"
+        source = tree_js.read_text(encoding="utf-8")
+        css = library_css.read_text(encoding="utf-8")
+        for name in (
+            "aiset-tree-topbar",
+            "aiset-tree-search-input",
+            "aiset-tree-context-path",
+        ):
+            self.assertIn(name, source)
+            self.assertIn(f".{name}", css)
+        self.assertIn("TreeEditor.prototype.search", source)
+        self.assertIn("TreeEditor.prototype.revealPath", source)
+
 
 if __name__ == "__main__":
     unittest.main()
